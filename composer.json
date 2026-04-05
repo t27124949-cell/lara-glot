@@ -1,0 +1,26 @@
+{
+    "name": "tonydev/lara-glot",
+    "description": "Smart Auto-Translation for Laravel Models with JSON/HTML support",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "stichoza/google-translate-php": "^5.3",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "illuminate/database": "^11.0|^12.0|^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Tonydev\\LaraGlot\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Tonydev\\LaraGlot\\LaraGlotServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
