@@ -6,21 +6,88 @@ return [
       |--------------------------------------------------------------------------
       | Source Locale
       |--------------------------------------------------------------------------
-      |
-      | The default language used for the original content. 
-      | This is the language the Google Translator will translate FROM.
-      |
+      | The locale your content is authored in. LaraGlot will never translate
+      | FROM this locale back to itself.
       */
       'source_locale' => 'en',
 
       /*
       |--------------------------------------------------------------------------
+      | Translation Driver
+      |--------------------------------------------------------------------------
+      | Which translation engine to use. One of:
+      |   'google'  — stichoza/google-translate-php (free, no API key needed)
+      |   'ollama'  — local LLM via cloudstudio/ollama (requires Ollama running)
+      |   'openai'  — OpenAI Chat Completions API (or any compatible endpoint)
+      |   'deepl'   — DeepL REST API (free or pro tier)
+      */
+      'translator' => env('LARAGLOT_DRIVER', 'google'),
+
+      /*
+      |--------------------------------------------------------------------------
+      | Driver Configuration
+      |--------------------------------------------------------------------------
+      | Settings specific to each driver. Only the active driver's block is used.
+      */
+      'drivers' => [
+
+            'google' => [
+                  // stichoza/google-translate-php requires no API key.
+                  // No additional configuration needed.
+            ],
+
+            'ollama' => [
+                  // The Ollama model to use. Must be pulled locally first:
+                  //   ollama pull llama3
+                  //   ollama pull mistral
+                  'model' => env('LARAGLOT_OLLAMA_MODEL', 'llama3'),
+
+                  // Number of strings sent per LLM prompt.
+                  // Lower = less RAM, more API calls. Higher = more RAM, fewer calls.
+                  // 15 is a safe default for an M-series Mac with 16 GB RAM.
+                  // Reduce to 5-10 if you still see OOM kills.
+                  'chunk_size' => env('LARAGLOT_OLLAMA_CHUNK_SIZE', 15),
+            ],
+
+            'openai' => [
+                  'api_key' => env('OPENAI_API_KEY'),
+                  'model' => env('LARAGLOT_OPENAI_MODEL', 'gpt-4o-mini'),
+                  'chunk_size' => env('LARAGLOT_OPENAI_CHUNK_SIZE', 30),
+
+                  // Override base_url to use any OpenAI-compatible endpoint
+                  // (e.g. Azure OpenAI, Groq, Together AI, local LM Studio):
+                  'base_url' => env('LARAGLOT_OPENAI_BASE_URL', 'https://api.openai.com/v1'),
+            ],
+
+            'deepl' => [
+                  // API key from deepl.com. Free tier keys end with ':fx'.
+                  'api_key' => env('DEEPL_API_KEY'),
+
+                  // Auto-detected from key suffix. Override here if needed.
+                  // 'base_url' => 'https://api-free.deepl.com/v2',
+            ],
+
+      ],
+
+      /*
+      |--------------------------------------------------------------------------
+      | Excluded Language Files
+      |--------------------------------------------------------------------------
+      | PHP files inside lang/en/ that should NOT be translated.
+      | Typically Laravel's own framework files which ship with official translations.
+      */
+      'exclude_files' => [
+            'auth',
+            'pagination',
+            'passwords',
+            'validation',
+      ],
+
+      /*
+      |--------------------------------------------------------------------------
       | Supported Languages
       |--------------------------------------------------------------------------
-      |
-      | A list of all target locales. The package will iterate through these
-      | keys to generate translations for your model fields.
-      |
+      | All target locales. LaraGlot will never translate back to source_locale.
       */
       'languages' => [
             'en' => ['name' => 'English', 'flag' => '🇬🇧'],
@@ -47,36 +114,30 @@ return [
 
       /*
       |--------------------------------------------------------------------------
-      | Queue Configuration
+      | Queue
       |--------------------------------------------------------------------------
-      |
-      | The name of the queue where translation jobs will be dispatched.
-      | Make sure your queue worker is running: php artisan queue:work --queue=translations
-      |
+      | Queue name for TranslateFilesJob and TranslateModelJob.
+      | Run worker: php artisan queue:work --queue=translations,default
       */
-      'queue' => 'translations',
+      'queue' => env('LARAGLOT_QUEUE', 'translations'),
 
       /*
       |--------------------------------------------------------------------------
-      | Cache Settings
+      | Cache Expiry
       |--------------------------------------------------------------------------
-      |
-      | Duration (in seconds) for which the translations should be cached.
-      | Default is 30 days.
-      |
+      | How long (seconds) translated strings are cached. Default: 30 days.
       */
-      'cache_expiry' => 2592000,
+      'cache_expiry' => env('LARAGLOT_CACHE_EXPIRY', 2592000),
 
       /*
       |--------------------------------------------------------------------------
-      | Auto-Sync Models
+      | Registered Models
       |--------------------------------------------------------------------------
-      |
-      | List the full class names of models that should be processed when
-      | running the `php artisan laraglot:sync` command.
-      |
+      | Models processed by `php artisan laraglot:sync`.
       */
       'models' => [
-            // Add your model classes here, e.g., \App\Models\Page::class,
+            // \App\Models\Page::class,
+            // \App\Models\Post::class,
       ],
+
 ];

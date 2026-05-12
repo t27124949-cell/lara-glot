@@ -2,8 +2,8 @@
 
 namespace Tonydev\LaraGlot\Jobs;
 
-// FIXED: Use the package namespace for the service
 use Tonydev\LaraGlot\Services\SmartTranslationService;
+use Illuminate\Bus\Batchable;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -13,68 +13,59 @@ use Illuminate\Support\Facades\Log;
 
 class TranslateModelJob implements ShouldQueue
 {
-      use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+      use Batchable, Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-      /**
-       * Using public properties allows Laravel to serialize the job data automatically.
-       */
-      public string $modelClass;
-      public $modelId;
-      public bool $force;
-
-      /**
-       * Package optimization: 10 minutes timeout is safe for large HTML blocks.
-       */
       public int $tries = 3;
       public int $timeout = 600;
 
-      public function __construct(string $modelClass, $modelId, bool $force = false)
-      {
-            $this->modelClass = $modelClass;
-            $this->modelId = $modelId;
-            $this->force = $force;
+      public function __construct(
+            public readonly string $modelClass,
+            public readonly mixed $modelId,
+            public readonly bool $force = false,
+      ) {
       }
 
       public function handle(SmartTranslationService $translator): void
       {
-            Log::info("🚀 [LaraGlot] Translation Job Started", [
+            // Respect batch cancellation
+            if ($this->batch()?->cancelled()) {
+                  return;
+            }
+
+            Log::info('🚀 [LaraGlot] Model job started', [
                   'model' => $this->modelClass,
                   'id' => $this->modelId,
-                  'force' => $this->force
+                  'force' => $this->force,
             ]);
 
-            // Accessing model without global scopes is safer for background tasks
             $model = $this->modelClass::withoutGlobalScopes()->find($this->modelId);
 
             if (!$model) {
-                  Log::warning("⚠️ [LaraGlot] Model not found", [
+                  Log::warning('⚠️ [LaraGlot] Model not found — skipping', [
                         'class' => $this->modelClass,
-                        'id' => $this->modelId
+                        'id' => $this->modelId,
                   ]);
+                  // Not a failure — record was likely deleted between dispatch and processing
                   return;
             }
 
             try {
                   $translator->translateModel($model, $this->force);
 
-                  Log::info("✅ [LaraGlot] Translation completed", [
-                        'model' => $this->modelClass,
-                        'id' => $this->modelId
-                  ]);
-            } catch (\Throwable $e) {
-                  Log::error("❌ [LaraGlot] Translation Job Failed", [
+                  Log::info('✅ [LaraGlot] Model job complete', [
                         'model' => $this->modelClass,
                         'id' => $this->modelId,
-                        'error' => $e->getMessage()
                   ]);
-
-                  throw $e; // This triggers the backoff retries below
+            } catch (\Throwable $e) {
+                  Log::error('❌ [LaraGlot] Model job failed', [
+                        'model' => $this->modelClass,
+                        'id' => $this->modelId,
+                        'error' => $e->getMessage(),
+                  ]);
+                  throw $e;
             }
       }
 
-      /**
-       * Incremental backoff to handle temporary API rate limits or network blips.
-       */
       public function backoff(): array
       {
             return [30, 60, 120];

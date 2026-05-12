@@ -4,6 +4,8 @@ namespace Tonydev\LaraGlot;
 
 use Illuminate\Support\ServiceProvider;
 use Tonydev\LaraGlot\Commands\DispatchTranslations;
+use Tonydev\LaraGlot\Commands\TranslateFilesCommand;
+use Tonydev\LaraGlot\Services\FileTranslationService;
 use Tonydev\LaraGlot\Services\SmartTranslationService;
 use Tonydev\LaraGlot\Services\TranslationService;
 
@@ -14,17 +16,23 @@ class LaraGlotServiceProvider extends ServiceProvider
        */
       public function register(): void
       {
-            // Use 'lara-glot' as the unique config key
-            $this->mergeConfigFrom(__DIR__ . '/../config/lara-glot.php', 'lara-glot');
+            $this->mergeConfigFrom(
+                  __DIR__ . '/../config/lara-glot.php',
+                  'lara-glot'
+            );
 
-            // Register the base Translation API service
-            $this->app->singleton(TranslationService::class, function ($app) {
-                  return new TranslationService();
+            $this->app->singleton(TranslationService::class, fn() => new TranslationService());
+
+            $this->app->singleton(FileTranslationService::class, function ($app) {
+                  return new FileTranslationService(
+                        $app->make(TranslationService::class)
+                  );
             });
 
-            // Register the Smart Logic service (injecting the base service)
             $this->app->singleton(SmartTranslationService::class, function ($app) {
-                  return new SmartTranslationService($app->make(TranslationService::class));
+                  return new SmartTranslationService(
+                        $app->make(TranslationService::class)
+                  );
             });
       }
 
@@ -34,17 +42,19 @@ class LaraGlotServiceProvider extends ServiceProvider
       public function boot(): void
       {
             if ($this->app->runningInConsole()) {
-                  // 1. Publish the config file
-                  // Users can run: php artisan vendor:publish --tag=lara-glot-config
                   $this->publishes([
                         __DIR__ . '/../config/lara-glot.php' => config_path('lara-glot.php'),
                   ], 'lara-glot-config');
 
-                  // 2. Register the artisan command
-
                   $this->commands([
                         DispatchTranslations::class,
+                        TranslateFilesCommand::class,
                   ]);
             }
+
+            $this->loadViewsFrom(
+                  __DIR__ . '/../resources/views',
+                  'lara-glot'
+            );
       }
 }
