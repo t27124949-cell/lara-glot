@@ -31,6 +31,17 @@ class LaraGlotManager extends Page
       protected string $view = 'lara-glot::filament.admin.pages.lara-glot-manager';
 
       // ─────────────────────────────────────────────────────────────────────────
+      // Session keys
+      //
+      // Batch IDs are written to the session so a page refresh can restore the
+      // active progress section. Without this, Livewire loses all public
+      // properties on every full-page reload.
+      // ─────────────────────────────────────────────────────────────────────────
+
+      private const SESSION_FILE_BATCH = 'lara-glot.file_batch_id';
+      private const SESSION_MODEL_BATCH = 'lara-glot.model_batch_id';
+
+      // ─────────────────────────────────────────────────────────────────────────
       // Form state — FILE section
       // Completely separate field names from the model section to prevent
       // Filament from cross-validating between the two groups.
@@ -97,6 +108,23 @@ class LaraGlotManager extends Page
       public function mount(): void
       {
             $this->form->fill();
+
+            // ── Restore file batch from session ───────────────────────────────────
+            // On a page refresh the Livewire component is re-mounted from scratch,
+            // losing all public properties. We persist the batch ID to the session
+            // so the progress section re-appears automatically after a reload.
+            $this->restoreBatchFromSession(
+                  self::SESSION_FILE_BATCH,
+                  'fileBatchId',
+                  'fileBatchProgress'
+            );
+
+            // ── Restore model batch from session ──────────────────────────────────
+            $this->restoreBatchFromSession(
+                  self::SESSION_MODEL_BATCH,
+                  'modelBatchId',
+                  'modelBatchProgress'
+            );
       }
 
       // ─────────────────────────────────────────────────────────────────────────
@@ -120,7 +148,6 @@ class LaraGlotManager extends Page
             return $schema
                   ->statePath('data')
                   ->components([
-
                         // ── SECTION 1: File Translation ───────────────────────
                         Section::make('📄 File Translation')
                               ->description(
@@ -130,6 +157,7 @@ class LaraGlotManager extends Page
                               ->schema([
                                     Grid::make(2)
                                           ->schema([
+
                                                 Select::make('fileFiles')
                                                       ->label('Source File(s)')
                                                       ->options($fileService->getTranslatableFiles())
@@ -137,7 +165,25 @@ class LaraGlotManager extends Page
                                                       ->native(false)
                                                       ->searchable()
                                                       ->placeholder('Select one or more files…')
-                                                      ->helperText('Files from lang/' . $sourceLocale . '/ (exclusions applied)'),
+                                                      ->helperText('Files from lang/' . $sourceLocale . '/ (exclusions applied)')
+                                                      ->hintAction(
+                                                            Action::make('clearFiles')
+                                                                  ->label('Clear')
+                                                                  ->icon('heroicon-m-x-mark')
+                                                                  ->color('gray')
+                                                                  ->action(fn($component) => $component->state([]))
+                                                      )
+                                                      ->suffixAction(
+                                                            Action::make('selectAllFiles')
+                                                                  ->label('Select All')
+                                                                  ->icon('heroicon-m-check-circle')
+                                                                  ->action(function ($component) use ($fileService) {
+                                                                        $component->state(
+                                                                              array_keys($fileService->getTranslatableFiles())
+                                                                        );
+                                                                  })
+                                                      ),
+
                                                 Select::make('fileLocales')
                                                       ->label('Target Language(s)')
                                                       ->options($targetLanguageOptions)
@@ -159,7 +205,7 @@ class LaraGlotManager extends Page
                                                                   ->action(function ($component) use ($targetLanguageOptions) {
                                                                         $component->state(array_keys($targetLanguageOptions));
                                                                   })
-                                                      )
+                                                      ),
                                           ]),
 
                                     Toggle::make('fileForce')
@@ -178,6 +224,7 @@ class LaraGlotManager extends Page
                               ->schema([
                                     Grid::make(2)
                                           ->schema([
+
                                                 Select::make('modelModels')
                                                       ->label('Model(s)')
                                                       ->options($modelOptions)
@@ -189,6 +236,21 @@ class LaraGlotManager extends Page
                                                             empty($modelOptions)
                                                             ? 'No models registered — add them to config/lara-glot.php'
                                                             : 'Records are chunked 100 at a time'
+                                                      )
+                                                      ->hintAction(
+                                                            Action::make('clearModels')
+                                                                  ->label('Clear')
+                                                                  ->icon('heroicon-m-x-mark')
+                                                                  ->color('gray')
+                                                                  ->action(fn($component) => $component->state([]))
+                                                      )
+                                                      ->suffixAction(
+                                                            Action::make('selectAllModels')
+                                                                  ->label('Select All')
+                                                                  ->icon('heroicon-m-check-circle')
+                                                                  ->action(function ($component) use ($modelOptions) {
+                                                                        $component->state(array_keys($modelOptions));
+                                                                  })
                                                       ),
 
                                                 Select::make('modelLocales')
@@ -197,7 +259,22 @@ class LaraGlotManager extends Page
                                                       ->multiple()
                                                       ->native(false)
                                                       ->searchable()
-                                                      ->placeholder('Select one or more languages…'),
+                                                      ->placeholder('Select one or more languages…')
+                                                      ->hintAction(
+                                                            Action::make('clearModelLocales')
+                                                                  ->label('Clear')
+                                                                  ->icon('heroicon-m-x-mark')
+                                                                  ->color('gray')
+                                                                  ->action(fn($component) => $component->state([]))
+                                                      )
+                                                      ->suffixAction(
+                                                            Action::make('selectAllModelLocales')
+                                                                  ->label('Select All')
+                                                                  ->icon('heroicon-m-check-circle')
+                                                                  ->action(function ($component) use ($targetLanguageOptions) {
+                                                                        $component->state(array_keys($targetLanguageOptions));
+                                                                  })
+                                                      ),
                                           ]),
 
                                     Toggle::make('modelForce')
@@ -214,7 +291,8 @@ class LaraGlotManager extends Page
 
       /**
        * Build one Bus::batch() containing one TranslateFilesJob per file × locale.
-       * The batch ID is stored in $fileBatchId so Blade can poll the progress.
+       * The batch ID is persisted to the session so a page refresh restores the
+       * progress section automatically.
        */
       public function dispatchFileJobs(): void
       {
@@ -231,7 +309,6 @@ class LaraGlotManager extends Page
                   return;
             }
 
-            // Build the flat job list
             $jobs = [];
             foreach ($locales as $locale) {
                   foreach ($files as $fileName) {
@@ -242,16 +319,20 @@ class LaraGlotManager extends Page
             $total = count($jobs);
             $queue = config('lara-glot.queue', 'translations');
 
-            // Dispatch as a named batch so we can look it up by ID
             $batch = Bus::batch($jobs)
                   ->name('LaraGlot: ' . $total . ' file job(s)')
                   ->onQueue($queue)
-                  ->allowFailures()   // One failed job doesn't cancel the rest
+                  ->allowFailures()
                   ->dispatch();
 
-            // Store the batch ID — Blade will poll pollFileBatch() every 3 s
             $this->fileBatchId = $batch->id;
-            $this->fileBatchProgress = $this->buildBatchProgress($batch, count($files) . ' file(s) × ' . count($locales) . ' language(s)');
+            $this->fileBatchProgress = $this->buildBatchProgress(
+                  $batch,
+                  count($files) . ' file(s) × ' . count($locales) . ' language(s)'
+            );
+
+            // Persist to session so a page refresh re-mounts the progress section.
+            session([self::SESSION_FILE_BATCH => $batch->id]);
 
             Notification::make()
                   ->title("{$total} file job(s) dispatched!")
@@ -273,17 +354,21 @@ class LaraGlotManager extends Page
             $batch = Bus::findBatch($this->fileBatchId);
 
             if (!$batch) {
-                  // Batch record cleaned up — stop polling
+                  // Batch record cleaned up — stop polling and clear session.
                   $this->fileBatchId = null;
                   $this->fileBatchProgress = null;
+                  session()->forget(self::SESSION_FILE_BATCH);
                   return;
             }
 
             $this->fileBatchProgress = $this->buildBatchProgress($batch);
 
-            // Stop polling once complete or cancelled
             if ($batch->finished()) {
+                  // Stop polling; keep $fileBatchProgress so the "complete" banner
+                  // stays visible. The session key is cleared so a fresh reload
+                  // after completion doesn't re-mount a finished batch.
                   $this->fileBatchId = null;
+                  session()->forget(self::SESSION_FILE_BATCH);
 
                   $failedCount = $batch->failedJobs;
                   if ($failedCount > 0) {
@@ -448,6 +533,8 @@ class LaraGlotManager extends Page
       /**
        * Chunk through every selected model's records and build one Bus::batch().
        * Uses chunkById(100) to avoid loading entire tables into memory.
+       * The batch ID is persisted to the session so a page refresh restores the
+       * progress section.
        */
       public function dispatchModelJobs(): void
       {
@@ -508,6 +595,9 @@ class LaraGlotManager extends Page
                   count($models) . ' model(s) · ' . $total . ' record(s)'
             );
 
+            // Persist to session so a page refresh re-mounts the progress section.
+            session([self::SESSION_MODEL_BATCH => $batch->id]);
+
             Notification::make()
                   ->title("{$total} model job(s) dispatched!")
                   ->body(count($models) . ' model(s) · ' . $total . ' record(s) — progress shown below.')
@@ -529,6 +619,7 @@ class LaraGlotManager extends Page
             if (!$batch) {
                   $this->modelBatchId = null;
                   $this->modelBatchProgress = null;
+                  session()->forget(self::SESSION_MODEL_BATCH);
                   return;
             }
 
@@ -536,6 +627,7 @@ class LaraGlotManager extends Page
 
             if ($batch->finished()) {
                   $this->modelBatchId = null;
+                  session()->forget(self::SESSION_MODEL_BATCH);
 
                   $failedCount = $batch->failedJobs;
                   if ($failedCount > 0) {
@@ -560,16 +652,21 @@ class LaraGlotManager extends Page
       {
             $batchIdProp = $type === 'file' ? 'fileBatchId' : 'modelBatchId';
             $progressProp = $type === 'file' ? 'fileBatchProgress' : 'modelBatchProgress';
+            $sessionKey = $type === 'file' ? self::SESSION_FILE_BATCH : self::SESSION_MODEL_BATCH;
 
             $batchId = $this->{$batchIdProp};
-            if (!$batchId)
+            if (!$batchId) {
                   return;
+            }
 
             $batch = Bus::findBatch($batchId);
             $batch?->cancel();
 
             $this->{$batchIdProp} = null;
             $this->{$progressProp} = null;
+
+            // Clear session so the cancelled batch doesn't reappear on refresh.
+            session()->forget($sessionKey);
 
             Notification::make()
                   ->title('Batch cancelled')
@@ -599,11 +696,52 @@ class LaraGlotManager extends Page
                   'processed' => $processed,
                   'failed' => $failed,
                   'pending' => max(0, $total - $processed - $failed),
-                  // Integer 0-100 for the <progress> element
+                  // Integer 0-100 for the progress bar
                   'progress' => $total > 0 ? (int) round(($processed / $total) * 100) : 0,
                   'finished' => $batch->finished(),
                   'cancelled' => $batch->cancelled(),
             ];
+      }
+
+      /**
+       * On mount, check the session for a previously-dispatched batch ID.
+       * If the batch still exists in the database and hasn't finished, restore
+       * the progress properties so the polling section re-appears after a refresh.
+       * If the batch is gone or already finished, silently clear the session key.
+       *
+       * @param  string $sessionKey    One of the SESSION_* constants.
+       * @param  string $batchIdProp   Property name: 'fileBatchId' | 'modelBatchId'
+       * @param  string $progressProp  Property name: 'fileBatchProgress' | 'modelBatchProgress'
+       */
+      private function restoreBatchFromSession(
+            string $sessionKey,
+            string $batchIdProp,
+            string $progressProp
+      ): void {
+            $batchId = session($sessionKey);
+
+            if (!$batchId) {
+                  return;
+            }
+
+            $batch = Bus::findBatch($batchId);
+
+            if (!$batch) {
+                  // The batch record was pruned — nothing to restore.
+                  session()->forget($sessionKey);
+                  return;
+            }
+
+            // Restore the progress regardless of whether the batch is still running
+            // or already finished, so the user sees the correct state after refresh.
+            $this->{$batchIdProp} = $batch->finished() ? null : $batchId;
+            $this->{$progressProp} = $this->buildBatchProgress($batch);
+
+            // If it finished between the last poll and the page refresh, clear
+            // the session so subsequent refreshes start clean.
+            if ($batch->finished()) {
+                  session()->forget($sessionKey);
+            }
       }
 
       // ─────────────────────────────────────────────────────────────────────────
@@ -634,6 +772,7 @@ class LaraGlotManager extends Page
                         ->modalSubmitActionLabel('Yes, Dispatch All')
                         ->action(function () use ($fileService, $targetLocales, $queue) {
                               $files = array_keys($fileService->getTranslatableFiles());
+
                               if (empty($targetLocales) || empty($files)) {
                                     Notification::make()->title('Nothing to sync')->warning()->send();
                                     return;
@@ -654,6 +793,7 @@ class LaraGlotManager extends Page
 
                               $this->fileBatchId = $batch->id;
                               $this->fileBatchProgress = $this->buildBatchProgress($batch);
+                              session([self::SESSION_FILE_BATCH => $batch->id]);
 
                               Notification::make()
                                     ->title(count($jobs) . ' file job(s) dispatched!')
@@ -673,6 +813,7 @@ class LaraGlotManager extends Page
                         ->action(function () use ($fileService, $targetLocales, $queue) {
                               $files = array_keys($fileService->getTranslatableFiles());
                               $jobs = [];
+
                               foreach ($targetLocales as $locale) {
                                     foreach ($files as $fileName) {
                                           $jobs[] = new TranslateFilesJob($fileName, $locale, true);
@@ -687,6 +828,7 @@ class LaraGlotManager extends Page
 
                               $this->fileBatchId = $batch->id;
                               $this->fileBatchProgress = $this->buildBatchProgress($batch);
+                              session([self::SESSION_FILE_BATCH => $batch->id]);
 
                               Notification::make()
                                     ->title(count($jobs) . ' file job(s) dispatched (force mode)!')
@@ -704,6 +846,7 @@ class LaraGlotManager extends Page
                         ->modalSubmitActionLabel('Yes, Dispatch All Model Jobs')
                         ->action(function () use ($targetLocales, $queue) {
                               $models = config('lara-glot.models', []);
+
                               if (empty($models) || empty($targetLocales)) {
                                     Notification::make()->title('Nothing to sync')->warning()->send();
                                     return;
@@ -711,8 +854,10 @@ class LaraGlotManager extends Page
 
                               $jobs = [];
                               foreach ($models as $modelClass) {
-                                    if (!class_exists($modelClass))
+                                    if (!class_exists($modelClass)) {
                                           continue;
+                                    }
+
                                     $modelClass::withoutGlobalScopes()->chunkById(100, function ($records) use ($modelClass, &$jobs) {
                                           foreach ($records as $record) {
                                                 $jobs[] = new TranslateModelJob($modelClass, $record->getKey(), false);
@@ -733,6 +878,7 @@ class LaraGlotManager extends Page
 
                               $this->modelBatchId = $batch->id;
                               $this->modelBatchProgress = $this->buildBatchProgress($batch);
+                              session([self::SESSION_MODEL_BATCH => $batch->id]);
 
                               Notification::make()
                                     ->title(count($jobs) . ' model job(s) dispatched!')

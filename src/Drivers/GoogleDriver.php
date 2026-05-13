@@ -4,59 +4,142 @@ namespace Tonydev\LaraGlot\Drivers;
 
 use Illuminate\Support\Facades\Log;
 use Stichoza\GoogleTranslate\GoogleTranslate;
+use Throwable;
 
 /**
- * Translation driver backed by the unofficial Google Translate library.
+ * Google Translate Driver (Unofficial — stichoza/google-translate-php)
  *
- * Google has no true batch endpoint, so each string is translated
- * individually. translateBatch() loops over translate() accordingly.
+ * ──────────────────────────────────────────────────────────────────────────────
+ * Overview
+ * ──────────────────────────────────────────────────────────────────────────────
  *
- * The unofficial library scrapes the public Google Translate web interface;
- * use DeepL or OpenAI for production workloads where reliability is critical.
+ * Uses the unofficial Google Translate web endpoint via the stichoza package.
+ * Because the endpoint is undocumented and has no SLA, this driver:
+ *  - Gracefully falls back to the original string on any failure (never throws).
+ *  - Adds optional per-request jitter to reduce the chance of rate-limiting.
+ *  - Creates a new GoogleTranslate instance per request (stateless = concurrency safe).
+ *
+ * Recommended for:
+ *  - Local development / prototyping
+ *  - Low-volume production workloads
+ *  - Artisan-driven translation file generation
+ *
+ * For mission-critical or high-volume production:
+ *  → Use the DeepL or OpenAI driver instead.
+ *
+ * ──────────────────────────────────────────────────────────────────────────────
+ * Config keys  (lara-glot.drivers.google.*)
+ * ──────────────────────────────────────────────────────────────────────────────
+ *
+ *  max_retries      int   How many times to retry a failed request.       (3)
+ *  retry_delay_ms   int   Base delay between retries in milliseconds.    (300)
+ *  concurrency      int   Max parallel tasks per Concurrency batch.        (5)
+ *  cache_enabled    bool  Whether to read/write the Laravel cache.       (true)
+ *  cache_ttl        int   Cache lifetime in seconds.              (2592000)
+ *  batch_delay_ms   int   Optional jitter added before each batch task.    (0)
  */
 class GoogleDriver extends AbstractTranslationDriver
 {
-      protected GoogleTranslate $client;
-      protected int $maxRetries = 3;
-      protected int $retryDelayMs = 300;
+      /**
+       * Optional per-task delay (microseconds × 1000) injected before each
+       * concurrent translation to spread load and reduce the risk of a 429.
+       * 0 = no delay.
+       */
+      protected int $batchDelayMs;
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // Bootstrap
+      // ─────────────────────────────────────────────────────────────────────────
 
       public function __construct()
       {
-            $this->client = new GoogleTranslate();
+            // Hydrate all shared properties declared in AbstractTranslationDriver
+            // from the driver-specific config namespace.
             $this->maxRetries = (int) config('lara-glot.drivers.google.max_retries', 3);
             $this->retryDelayMs = (int) config('lara-glot.drivers.google.retry_delay_ms', 300);
+            $this->concurrencyLimit = max(1, (int) config('lara-glot.drivers.google.concurrency', 5));
+            $this->cacheEnabled = (bool) config('lara-glot.drivers.google.cache_enabled', true);
+            $this->cacheTtl = (int) config('lara-glot.drivers.google.cache_ttl', 2_592_000); // matches global LARAGLOT_CACHE_EXPIRY default
+            $this->batchDelayMs = (int) config('lara-glot.drivers.google.batch_delay_ms', 0);
       }
 
       // ─────────────────────────────────────────────────────────────────────────
-      // Single translation (core path for this driver)
+      // Driver identity
       // ─────────────────────────────────────────────────────────────────────────
 
       /**
-       * Translate one string.
-       *
-       * Overrides the default AbstractTranslationDriver::translate() because
-       * Google's library is string-at-a-time; routing through translateBatch()
-       * would add unnecessary overhead.
+       * Unique snake_case name for this driver.
+       * Used by the abstract class to build cache keys ("laraglot:google:...")
+       * and log tags ("[LaraGlot:Google] ...").
        */
-      public function translate(string $text, string $target, string $source = 'en'): string
+      protected function driverName(): string
       {
+            return 'google';
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // Single-string translation  (overrides the default batch-delegate)
+      // ─────────────────────────────────────────────────────────────────────────
+
+      /**
+       * Translate a single string from $source to $target.
+       *
+       * WHY OVERRIDE?
+       * Google's unofficial API translates one string at a time. There is no
+       * batch endpoint, so there is no JSON-array overhead to avoid. A direct
+       * call is cheaper than packaging the text into a one-element array and
+       * unwrapping the result as the default implementation would do.
+       *
+       * FLOW:
+       *  1. Return empty string immediately for blank input.
+       *  2. Check the cache — return the cached value if present.
+       *  3. Protect placeholders (`:name`, URLs, no-translate spans).
+       *  4. Call the unofficial Google endpoint with retry/back-off.
+       *  5. Restore placeholders + normalize whitespace/entities.
+       *  6. Write to cache, return to caller.
+       *  7. On any failure: log the error and return the original string (graceful fallback).
+       */
+      public function translate(
+            string $text,
+            string $target,
+            string $source = 'en'
+      ): string {
+            // ── Guard: nothing to translate ───────────────────────────────────────
             if (trim($text) === '') {
                   return $text;
             }
 
+            // ── Cache read ────────────────────────────────────────────────────────
+            $cacheKey = $this->getCacheKey($text, $target, $source);
+            $cached = $this->getFromCache($cacheKey);
+
+            if ($cached !== null) {
+                  return $cached;
+            }
+
+            // ── Protect dynamic tokens before sending to the API ──────────────────
+            // e.g. ":name", "https://example.com", <span translate="no">…</span>
+            // These would be mangled by the translation engine without protection.
             [$protected, $placeholders] = $this->protectPlaceholders($text);
 
             try {
+                  // ── API call with retry ───────────────────────────────────────────
+                  $this->recordApiCall();
+
                   $translated = $this->withRetry(
                         function () use ($protected, $source, $target): string {
+                              // New instance per call = no shared state between concurrent tasks.
+                              $client = new GoogleTranslate();
 
-                              $result = $this->client
+                              $result = $client
                                     ->setSource($source)
                                     ->setTarget($target)
                                     ->translate($protected);
 
                               if (!is_string($result) || trim($result) === '') {
-                                    throw new \RuntimeException('Google Translate returned an empty result.');
+                                    throw new \RuntimeException(
+                                          'Google Translate returned an empty result.'
+                                    );
                               }
 
                               return $result;
@@ -66,39 +149,111 @@ class GoogleDriver extends AbstractTranslationDriver
                         ':Google'
                   );
 
-            } catch (\Throwable $e) {
-                  Log::error('[LaraGlot:Google] Translation failed permanently.', [
+                  // ── Post-processing ───────────────────────────────────────────────
+                  // normalize() → trim whitespace + decode HTML entities
+                  // restorePlaceholders() → put back :name, URLs, etc.
+                  $final = $this->restorePlaceholders(
+                        $this->normalizeTranslated($translated),
+                        $placeholders
+                  );
+
+                  // ── Cache write ───────────────────────────────────────────────────
+                  $this->putInCache($cacheKey, $final);
+
+                  return $final;
+
+            } catch (Throwable $e) {
+                  // Graceful fallback: log the error but never crash the caller.
+                  // Returning $text means the UI shows the source-language string,
+                  // which is always better than a broken page or an exception.
+                  Log::error("{$this->logTag()} Translation failed.", [
                         'target' => $target,
+                        'source' => $source,
+                        'text' => mb_substr($text, 0, 100),
                         'error' => $e->getMessage(),
                   ]);
 
-                  return $text; // graceful degradation
+                  return $text;
             }
-
-            return $this->restorePlaceholders(
-                  $this->normalizeTranslated($translated),
-                  $placeholders
-            );
       }
 
       // ─────────────────────────────────────────────────────────────────────────
-      // Batch translation (loops single translations)
+      // Batch translation
       // ─────────────────────────────────────────────────────────────────────────
 
       /**
-       * Translate an array of strings by calling translate() per entry.
+       * Translate multiple strings concurrently.
        *
-       * Non-string and empty values are passed through unchanged.
+       * FLOW:
+       *  1. Skip blank / non-string values immediately (preserve as-is).
+       *  2. Serve cache hits without building a task.
+       *  3. Wrap each remaining string in a closure for Concurrency::run().
+       *     Optionally inject a jitter delay to spread load.
+       *  4. Fan out all tasks via runConcurrentBatches() (inherited helper)
+       *     which chunks tasks into groups of $concurrencyLimit.
+       *  5. Merge results and restore original key order with ksort().
+       *
+       * @param  array<int|string, string> $texts
+       * @return array<int|string, string>
        */
-      public function translateBatch(array $texts, string $target, string $source = 'en'): array
-      {
+      public function translateBatch(
+            array $texts,
+            string $target,
+            string $source = 'en'
+      ): array {
             $results = [];
+            $tasks = [];
 
             foreach ($texts as $key => $text) {
-                  $results[$key] = (is_string($text) && trim($text) !== '')
-                        ? $this->translate($text, $target, $source)
-                        : $text;
+                  // ── Skip non-strings and blank values ─────────────────────────────
+                  // Preserve them in the result set as-is so key alignment is maintained.
+                  if (!is_string($text) || trim($text) === '') {
+                        $results[$key] = $text;
+                        continue;
+                  }
+
+                  // ── Cache shortcut ────────────────────────────────────────────────
+                  $cached = $this->getFromCache($this->getCacheKey($text, $target, $source));
+
+                  if ($cached !== null) {
+                        $results[$key] = $cached;
+                        continue;
+                  }
+
+                  // ── Enqueue as a concurrent task ──────────────────────────────────
+                  // Each closure captures its own $text / $target / $source so there
+                  // is no shared mutable state between tasks.
+                  $tasks[$key] = function () use ($text, $target, $source): string {
+                        // Optional jitter: spread requests over time to avoid bursty
+                        // traffic hitting the unofficial endpoint simultaneously.
+                        if ($this->batchDelayMs > 0) {
+                              usleep($this->batchDelayMs * 1_000);
+                        }
+
+                        // Delegate to translate() which handles cache, placeholders,
+                        // retry, and graceful fallback all in one place.
+                        return $this->translate($text, $target, $source);
+                  };
             }
+
+            // ── Run all pending tasks concurrently ────────────────────────────────
+            // runConcurrentBatches() is defined in AbstractTranslationDriver.
+            // It splits $tasks into chunks of $concurrencyLimit, calls
+            // Concurrency::run() on each chunk, and merges the results while
+            // preserving associative keys.
+            if (!empty($tasks)) {
+                  $batchResults = $this->runConcurrentBatches(
+                        $tasks,
+                        $this->concurrencyLimit
+                  );
+
+                  foreach ($batchResults as $key => $translated) {
+                        $results[$key] = $translated;
+                  }
+            }
+
+            // Restore the original key order before returning.
+            ksort($results);
 
             return $results;
       }

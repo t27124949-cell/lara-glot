@@ -9,17 +9,14 @@ return [
       | The locale your content is authored in. LaraGlot will never translate
       | FROM this locale back to itself.
       */
-      'source_locale' => 'en',
+      'source_locale' => env('LARAGLOT_SOURCE_LOCALE', 'en'),
 
       /*
       |--------------------------------------------------------------------------
       | Translation Driver
       |--------------------------------------------------------------------------
-      | Which translation engine to use. One of:
-      |   'google'  — stichoza/google-translate-php (free, no API key needed)
-      |   'ollama'  — local LLM via cloudstudio/ollama (requires Ollama running)
-      |   'openai'  — OpenAI Chat Completions API (or any compatible endpoint)
-      |   'deepl'   — DeepL REST API (free or pro tier)
+      | Which translation engine to use. 
+      | Options: 'google', 'ollama', 'openai', 'deepl'
       */
       'translator' => env('LARAGLOT_DRIVER', 'google'),
 
@@ -27,44 +24,49 @@ return [
       |--------------------------------------------------------------------------
       | Driver Configuration
       |--------------------------------------------------------------------------
-      | Settings specific to each driver. Only the active driver's block is used.
       */
       'drivers' => [
 
             'google' => [
-                  // stichoza/google-translate-php requires no API key.
-                  // No additional configuration needed.
+                  'max_retries' => (int) env('LARAGLOT_GOOGLE_RETRIES', 3),
+                  'retry_delay_ms' => (int) env('LARAGLOT_GOOGLE_RETRY_DELAY', 300),
+                  'concurrency' => (int) env('LARAGLOT_GOOGLE_CONCURRENCY', 5),
+                  'batch_delay_ms' => (int) env('LARAGLOT_GOOGLE_BATCH_DELAY', 100),
+                  'cache_enabled' => (bool) env('LARAGLOT_GOOGLE_CACHE', true),
+                  'cache_ttl' => (int) env('LARAGLOT_CACHE_EXPIRY', 2592000),
             ],
 
             'ollama' => [
-                  // The Ollama model to use. Must be pulled locally first:
-                  //   ollama pull llama3
-                  //   ollama pull mistral
                   'model' => env('LARAGLOT_OLLAMA_MODEL', 'llama3'),
-
-                  // Number of strings sent per LLM prompt.
-                  // Lower = less RAM, more API calls. Higher = more RAM, fewer calls.
-                  // 15 is a safe default for an M-series Mac with 16 GB RAM.
-                  // Reduce to 5-10 if you still see OOM kills.
-                  'chunk_size' => env('LARAGLOT_OLLAMA_CHUNK_SIZE', 15),
+                  'chunk_size' => (int) env('LARAGLOT_OLLAMA_CHUNK_SIZE', 15),
+                  'max_retries' => (int) env('LARAGLOT_OLLAMA_RETRIES', 3),
+                  'retry_delay_ms' => (int) env('LARAGLOT_OLLAMA_RETRY_DELAY', 1000), // LLMs need more time
+                  'concurrency' => (int) env('LARAGLOT_OLLAMA_CONCURRENCY', 2),
+                  'cache_enabled' => (bool) env('LARAGLOT_OLLAMA_CACHE', true),
+                  'cache_ttl' => (int) env('LARAGLOT_CACHE_EXPIRY', 2592000),
             ],
 
             'openai' => [
                   'api_key' => env('OPENAI_API_KEY'),
                   'model' => env('LARAGLOT_OPENAI_MODEL', 'gpt-4o-mini'),
-                  'chunk_size' => env('LARAGLOT_OPENAI_CHUNK_SIZE', 30),
-
-                  // Override base_url to use any OpenAI-compatible endpoint
-                  // (e.g. Azure OpenAI, Groq, Together AI, local LM Studio):
                   'base_url' => env('LARAGLOT_OPENAI_BASE_URL', 'https://api.openai.com/v1'),
+                  'chunk_size' => (int) env('LARAGLOT_OPENAI_CHUNK_SIZE', 30),
+                  'max_retries' => (int) env('LARAGLOT_OPENAI_RETRIES', 3),
+                  'retry_delay_ms' => (int) env('LARAGLOT_OPENAI_RETRY_DELAY', 500),
+                  'concurrency' => (int) env('LARAGLOT_OPENAI_CONCURRENCY', 3),
+                  'cache_enabled' => (bool) env('LARAGLOT_OPENAI_CACHE', true),
+                  'cache_ttl' => (int) env('LARAGLOT_CACHE_EXPIRY', 2592000),
             ],
 
             'deepl' => [
-                  // API key from deepl.com. Free tier keys end with ':fx'.
                   'api_key' => env('DEEPL_API_KEY'),
-
-                  // Auto-detected from key suffix. Override here if needed.
-                  // 'base_url' => 'https://api-free.deepl.com/v2',
+                  'base_url' => env('DEEPL_BASE_URL'), // Leave null for auto-detection (:fx)
+                  'chunk_size' => (int) env('LARAGLOT_DEEPL_CHUNK_SIZE', 50),
+                  'max_retries' => (int) env('LARAGLOT_DEEPL_RETRIES', 3),
+                  'retry_delay_ms' => (int) env('LARAGLOT_DEEPL_RETRY_DELAY', 500),
+                  'concurrency' => (int) env('LARAGLOT_DEEPL_CONCURRENCY', 3),
+                  'cache_enabled' => (bool) env('LARAGLOT_DEEPL_CACHE', true),
+                  'cache_ttl' => (int) env('LARAGLOT_CACHE_EXPIRY', 2592000),
             ],
 
       ],
@@ -73,8 +75,6 @@ return [
       |--------------------------------------------------------------------------
       | Excluded Language Files
       |--------------------------------------------------------------------------
-      | PHP files inside lang/en/ that should NOT be translated.
-      | Typically Laravel's own framework files which ship with official translations.
       */
       'exclude_files' => [
             'auth',
@@ -87,7 +87,6 @@ return [
       |--------------------------------------------------------------------------
       | Supported Languages
       |--------------------------------------------------------------------------
-      | All target locales. LaraGlot will never translate back to source_locale.
       */
       'languages' => [
             'en' => ['name' => 'English', 'flag' => '🇬🇧'],
@@ -114,18 +113,16 @@ return [
 
       /*
       |--------------------------------------------------------------------------
-      | Queue
+      | Queue Configuration
       |--------------------------------------------------------------------------
-      | Queue name for TranslateFilesJob and TranslateModelJob.
-      | Run worker: php artisan queue:work --queue=translations,default
       */
       'queue' => env('LARAGLOT_QUEUE', 'translations'),
 
       /*
       |--------------------------------------------------------------------------
-      | Cache Expiry
+      | Global Cache Expiry
       |--------------------------------------------------------------------------
-      | How long (seconds) translated strings are cached. Default: 30 days.
+      | Default: 30 days (2,592,000 seconds).
       */
       'cache_expiry' => env('LARAGLOT_CACHE_EXPIRY', 2592000),
 
@@ -133,11 +130,9 @@ return [
       |--------------------------------------------------------------------------
       | Registered Models
       |--------------------------------------------------------------------------
-      | Models processed by `php artisan laraglot:sync`.
       */
       'models' => [
             // \App\Models\Page::class,
-            // \App\Models\Post::class,
       ],
 
 ];

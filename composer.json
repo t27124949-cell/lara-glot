@@ -3,12 +3,17 @@
     "description": "Smart Auto-Translation for Laravel Models with JSON/HTML support",
     "type": "library",
     "license": "MIT",
-    "require": {
-        "php": "^8.2",
-        "stichoza/google-translate-php": "^5.3",
-        "illuminate/support": "^11.0|^12.0|^13.0",
-        "illuminate/database": "^11.0|^12.0|^13.0"
-    },
+"require": {
+    "php": "^8.2",
+    "illuminate/support": "^11.0|^12.0|^13.0",
+    "illuminate/database": "^11.0|^12.0|^13.0",
+    "illuminate/http": "^11.0|^12.0|^13.0",
+    "guzzlehttp/guzzle": "^7.8",
+    "stichoza/google-translate-php": "^5.3"
+},
+"suggest": {
+    "cloudstudio/ollama-laravel": "Optional: enables local Ollama AI integration"
+},
     "autoload": {
         "psr-4": {
             "Tonydev\\LaraGlot\\": "src/"
