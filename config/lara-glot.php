@@ -120,6 +120,41 @@ return [
 
       /*
       |--------------------------------------------------------------------------
+      | Ignored Attribute Keys
+      |--------------------------------------------------------------------------
+      | These keys will be skipped during the translation process. 
+      | Useful for IDs, slugs, URLs, and technical metadata that 
+      | should remain identical across all languages.
+      */
+      'ignored_keys' => [
+            'id',
+            'slug',
+            'url',
+            'image',
+            'icon',
+            'primary_url',
+            'secondary_url',
+            'cta_url',
+            'autoplay_speed',
+            'sort_order',
+            'layout_type',
+            '_en_original',
+            'en_original',
+            'external_id',
+            'is_crypto',
+            'is_deposit_enabled',
+            'is_withdrawal_enabled',
+            'is_transfer_enabled',
+            'is_active',
+            'is_automatic',
+            'requires_proof',
+            'color',
+            'currency',
+            'uuid',
+      ],
+
+      /*
+      |--------------------------------------------------------------------------
       | Global Cache Expiry
       |--------------------------------------------------------------------------
       | Default: 30 days (2,592,000 seconds).

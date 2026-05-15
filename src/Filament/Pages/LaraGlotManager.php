@@ -20,6 +20,7 @@ use Tonydev\LaraGlot\Jobs\TranslateFilePreviewJob;
 use Tonydev\LaraGlot\Jobs\TranslateModelJob;
 use Tonydev\LaraGlot\Services\FileTranslationService;
 use BackedEnum;
+use Tonydev\LaraGlot\Services\ModelTranslationManager;
 use UnitEnum;
 use Filament\Support\Icons\Heroicon;
 
@@ -536,6 +537,7 @@ class LaraGlotManager extends Page
        * The batch ID is persisted to the session so a page refresh restores the
        * progress section.
        */
+
       public function dispatchModelJobs(): void
       {
             $raw = $this->form->getRawState();
@@ -550,108 +552,68 @@ class LaraGlotManager extends Page
                   return;
             }
 
-            $jobs = [];
-            $queue = config('lara-glot.queue', 'translations');
+            try {
+                  $manager = app(ModelTranslationManager::class);
+                  $batchId = $manager->translateModelClasses($models, $force);
 
-            foreach ($models as $modelClass) {
-                  if (!class_exists($modelClass)) {
-                        Notification::make()
-                              ->title("Model not found: {$modelClass}")
-                              ->warning()
-                              ->send();
-                        continue;
-                  }
+                  $this->modelBatchId = $batchId;
+                  $this->modelBatchProgress = $manager->getBatchStatus($batchId); // ← Fixed here
+                  session([self::SESSION_MODEL_BATCH => $batchId]);
 
-                  // chunkById is memory-safe for large tables
-                  $modelClass::withoutGlobalScopes()->chunkById(
-                        100,
-                        function ($records) use ($modelClass, $force, &$jobs) {
-                              foreach ($records as $record) {
-                                    $jobs[] = new TranslateModelJob($modelClass, $record->getKey(), $force);
-                              }
-                        }
-                  );
-            }
-
-            if (empty($jobs)) {
                   Notification::make()
-                        ->title('No records found in the selected model(s).')
-                        ->info()
+                        ->title('Model translation batch dispatched!')
+                        ->body('Batch ID: ' . $batchId)
+                        ->success()
                         ->send();
-                  return;
+            } catch (\Exception $e) {
+                  Notification::make()
+                        ->title('Error dispatching jobs')
+                        ->body($e->getMessage())
+                        ->danger()
+                        ->send();
             }
-
-            $total = count($jobs);
-
-            $batch = Bus::batch($jobs)
-                  ->name('LaraGlot: ' . $total . ' model record(s)')
-                  ->onQueue($queue)
-                  ->allowFailures()
-                  ->dispatch();
-
-            $this->modelBatchId = $batch->id;
-            $this->modelBatchProgress = $this->buildBatchProgress(
-                  $batch,
-                  count($models) . ' model(s) · ' . $total . ' record(s)'
-            );
-
-            // Persist to session so a page refresh re-mounts the progress section.
-            session([self::SESSION_MODEL_BATCH => $batch->id]);
-
-            Notification::make()
-                  ->title("{$total} model job(s) dispatched!")
-                  ->body(count($models) . ' model(s) · ' . $total . ' record(s) — progress shown below.')
-                  ->success()
-                  ->send();
       }
 
-      /**
-       * Called by wire:poll.3000ms while $modelBatchId is set.
-       */
       public function pollModelBatch(): void
       {
             if (!$this->modelBatchId) {
                   return;
             }
 
-            $batch = Bus::findBatch($this->modelBatchId);
+            $manager = app(ModelTranslationManager::class);
+            $status = $manager->getBatchStatus($this->modelBatchId);
 
-            if (!$batch) {
+            if (!$status) {
                   $this->modelBatchId = null;
                   $this->modelBatchProgress = null;
                   session()->forget(self::SESSION_MODEL_BATCH);
                   return;
             }
 
-            $this->modelBatchProgress = $this->buildBatchProgress($batch);
+            $this->modelBatchProgress = $status;
 
-            if ($batch->finished()) {
+            if ($status['finished']) {
                   $this->modelBatchId = null;
                   session()->forget(self::SESSION_MODEL_BATCH);
 
-                  $failedCount = $batch->failedJobs;
-                  if ($failedCount > 0) {
+                  if ($status['failed'] > 0) {
                         Notification::make()
-                              ->title('Model batch finished with errors')
-                              ->body("{$failedCount} job(s) failed. Check storage/logs/laravel.log for details.")
+                              ->title('Batch finished with errors')
+                              ->body($status['failed'] . ' job(s) failed.')
                               ->warning()
                               ->send();
                   } else {
                         Notification::make()
-                              ->title('All model translations complete! ✅')
+                              ->title('All translations complete! ✅')
                               ->success()
                               ->send();
                   }
             }
       }
 
-      /**
-       * Cancel a running batch. Works for both file and model batches.
-       */
       public function cancelBatch(string $type): void
       {
             $batchIdProp = $type === 'file' ? 'fileBatchId' : 'modelBatchId';
-            $progressProp = $type === 'file' ? 'fileBatchProgress' : 'modelBatchProgress';
             $sessionKey = $type === 'file' ? self::SESSION_FILE_BATCH : self::SESSION_MODEL_BATCH;
 
             $batchId = $this->{$batchIdProp};
@@ -659,13 +621,10 @@ class LaraGlotManager extends Page
                   return;
             }
 
-            $batch = Bus::findBatch($batchId);
-            $batch?->cancel();
+            $manager = app(ModelTranslationManager::class);
+            $manager->cancelBatch($batchId);
 
             $this->{$batchIdProp} = null;
-            $this->{$progressProp} = null;
-
-            // Clear session so the cancelled batch doesn't reappear on refresh.
             session()->forget($sessionKey);
 
             Notification::make()
@@ -674,6 +633,7 @@ class LaraGlotManager extends Page
                   ->warning()
                   ->send();
       }
+
 
       // ─────────────────────────────────────────────────────────────────────────
       // Helpers

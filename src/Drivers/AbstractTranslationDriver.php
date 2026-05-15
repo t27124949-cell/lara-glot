@@ -362,12 +362,13 @@ abstract class AbstractTranslationDriver implements TranslationDriverInterface
       {
             $results = [];
 
-            // array_chunk with preserve_keys = true keeps associative keys intact
-            // so we can merge results back onto the correct original keys.
             foreach (array_chunk($tasks, $batchSize, true) as $batch) {
-                  // Every callable in $batch runs in parallel; execution blocks here
-                  // until the full batch completes before the next batch starts.
-                  $batchResults = Concurrency::run($batch);
+                  // We use the 'process' driver explicitly to access the timeout configuration.
+                  // By default, this is 60s. We increase it to 300s (5 minutes) to 
+                  // allow slow LLMs or large batches to finish.
+                  $batchResults = Concurrency::driver('process')
+                        ->timeout(300)
+                        ->run($batch);
 
                   foreach ($batchResults as $key => $value) {
                         $results[$key] = $value;

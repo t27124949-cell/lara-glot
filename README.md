@@ -1,68 +1,98 @@
 # LaraGlot 🌍
 
-**Smart Auto-Translation for Laravel Models & Language Files**
+**Smart Auto-Translation for Laravel Models, Language Files & Nested Content**
 
-LaraGlot is an industrial-strength translation pipeline for Laravel applications. It handles translating complex Eloquent models (including Filament Page Builder sections), static PHP language files, and nested JSON content — all while protecting your placeholders, HTML, and application logic from being mangled by translation engines.
+LaraGlot is an industrial-strength translation pipeline for Laravel applications. It intelligently translates:
 
----
+* Eloquent models
+* Nested JSON structures
+* Filament Page Builder sections
+* Static PHP language files
+* SEO metadata
+* Rich HTML content
 
-## Table of Contents
+…while protecting placeholders, HTML, IDs, slugs, application logic, and structural data from being corrupted by translation engines or LLMs.
 
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Model Setup](#model-setup)
-- [Language File Translation](#language-file-translation)
-- [Queue Setup](#queue-setup)
-- [Artisan Commands](#artisan-commands)
-- [Filament Integration](#filament-integration)
-- [Caching](#caching)
-- [Architecture](#architecture)
-- [Logging & Monitoring](#logging--monitoring)
-- [License](#license)
+Built for modern Laravel applications, LaraGlot combines:
 
----
-
-## Requirements
-
-| Requirement | Version |
-|---|---|
-| PHP | `^8.1` |
-| Laravel | `^10.0 \| ^11.0` |
-| Filament | `^3.0` |
-| spatie/laravel-translatable | `^6.0` |
-| stichoza/google-translate-php | `^5.0` |
-
-A running **queue worker** is required for background translation jobs. See [Queue Setup](#queue-setup).
+* Queue-based background processing
+* Smart recursive traversal
+* Multi-layer caching
+* AI-powered translation drivers
+* Filament admin tooling
+* Retry & timeout protection
+* Batch translation optimization
 
 ---
 
-## Installation
+# Table of Contents
+
+* [Requirements](#requirements)
+* [Installation](#installation)
+* [Configuration](#configuration)
+* [Driver Architecture](#driver-architecture)
+* [Model Setup](#model-setup)
+* [Language File Translation](#language-file-translation)
+* [Queue Setup & Timeouts](#queue-setup--timeouts)
+* [Artisan Commands](#artisan-commands)
+* [Filament Integration](#filament-integration)
+* [Caching Strategy](#caching-strategy)
+* [Architecture](#architecture)
+* [Service Responsibilities](#service-responsibilities)
+* [Logging & Monitoring](#logging--monitoring)
+* [Failure Recovery](#failure-recovery)
+* [Performance Optimizations](#performance-optimizations)
+* [License](#license)
+
+---
+
+# Requirements
+
+| Requirement                 | Version          |
+| --------------------------- | ---------------- |
+| PHP                         | `^8.1`           |
+| Laravel                     | `^10.0 \| ^11.0` |
+| Filament                    | `^3.0`           |
+| spatie/laravel-translatable | `^6.0`           |
+
+---
+
+# Installation
 
 ```bash
 composer require tonydev/lara-glot
 ```
 
-### Publish the Config
+---
+
+## Publish the Config
 
 ```bash
 php artisan vendor:publish --tag=lara-glot-config
 ```
 
-### Register the Commands
+---
 
-In your `App\Console\Kernel` (Laravel 10) or `bootstrap/app.php` (Laravel 11), ensure both commands are registered:
+## Register the Commands
+
+### Laravel 10
+
+Register commands inside `app/Console/Kernel.php`:
 
 ```php
-// Laravel 10 — app/Console/Kernel.php
 protected $commands = [
     \Tonydev\LaraGlot\Commands\TranslateFilesCommand::class,
     \Tonydev\LaraGlot\Commands\DispatchTranslations::class,
 ];
 ```
 
+---
+
+### Laravel 11
+
+Register commands inside `bootstrap/app.php`:
+
 ```php
-// Laravel 11 — bootstrap/app.php
 ->withCommands([
     \Tonydev\LaraGlot\Commands\TranslateFilesCommand::class,
     \Tonydev\LaraGlot\Commands\DispatchTranslations::class,
@@ -71,9 +101,15 @@ protected $commands = [
 
 ---
 
-## Configuration
+# Configuration
 
-After publishing, open `config/lara-glot.php`:
+After publishing, open:
+
+```php
+config/lara-glot.php
+```
+
+Example configuration:
 
 ```php
 return [
@@ -82,18 +118,25 @@ return [
     |--------------------------------------------------------------------------
     | Source Locale
     |--------------------------------------------------------------------------
-    | The locale your content is authored in. LaraGlot will never translate
-    | from this locale back to itself.
     */
     'source_locale' => 'en',
 
     /*
     |--------------------------------------------------------------------------
+    | Translation Driver
+    |--------------------------------------------------------------------------
+    | Supported:
+    | - openai
+    | - google
+    | - deepl
+    | - ollama
+    */
+    'translator' => env('LARAGLOT_DRIVER', 'openai'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Registered Models
     |--------------------------------------------------------------------------
-    | Models that should be processed by the `laraglot:sync` command.
-    | Each model must use the HasTranslations trait from spatie/laravel-translatable
-    | and implement getTranslatableAttributes().
     */
     'models' => [
         \App\Models\Page::class,
@@ -104,23 +147,41 @@ return [
     |--------------------------------------------------------------------------
     | Target Languages
     |--------------------------------------------------------------------------
-    | All locales LaraGlot will translate content into. The keys must be valid
-    | BCP-47 language tags supported by the Google Translate API.
     */
     'languages' => [
-        'es' => ['name' => 'Español',    'flag' => '🇪🇸'],
-        'fr' => ['name' => 'Français',   'flag' => '🇫🇷'],
-        'de' => ['name' => 'Deutsch',    'flag' => '🇩🇪'],
-        'ak' => ['name' => 'Twi',        'flag' => '🇬🇭'],
-        'pt' => ['name' => 'Português',  'flag' => '🇧🇷'],
+        'es' => ['name' => 'Español',   'flag' => '🇪🇸'],
+        'fr' => ['name' => 'Français',  'flag' => '🇫🇷'],
+        'de' => ['name' => 'Deutsch',   'flag' => '🇩🇪'],
+        'ak' => ['name' => 'Twi',       'flag' => '🇬🇭'],
+        'pt' => ['name' => 'Português', 'flag' => '🇧🇷'],
+        'ar' => ['name' => 'العربية',   'flag' => '🇸🇦'],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Ignored Structural Keys
+    |--------------------------------------------------------------------------
+    | Keys that should NEVER be translated.
+    */
+    'ignored_keys' => [
+        'id',
+        'uuid',
+        'slug',
+        'url',
+        'image',
+        'icon',
+        'sort_order',
+        'layout_type',
+        'created_at',
+        'updated_at',
+        'color',
+        'is_active',
     ],
 
     /*
     |--------------------------------------------------------------------------
     | Excluded Language Files
     |--------------------------------------------------------------------------
-    | PHP files inside lang/en/ that should NOT be translated. Typically these
-    | are Laravel's own framework files which ship with official translations.
     */
     'exclude_files' => [
         'auth',
@@ -133,17 +194,14 @@ return [
     |--------------------------------------------------------------------------
     | Queue Name
     |--------------------------------------------------------------------------
-    | The queue that TranslateModelJob and TranslateFilesJob will be dispatched
-    | on. Run a dedicated worker for this queue for best performance.
     */
     'queue' => 'translations',
 
     /*
     |--------------------------------------------------------------------------
-    | Cache Expiry (seconds)
+    | Cache Expiry
     |--------------------------------------------------------------------------
-    | How long translated strings are cached in your application cache driver.
-    | Default: 2,592,000 seconds = 30 days.
+    | Default: 30 days
     */
     'cache_expiry' => 2592000,
 
@@ -152,11 +210,90 @@ return [
 
 ---
 
-## Model Setup
+# Driver Architecture
 
-### 1. Add the Trait
+LaraGlot is driver-agnostic and supports both traditional translation engines and modern AI/LLM providers.
 
-LaraGlot works alongside `spatie/laravel-translatable`. Add both traits to any model you want auto-translated:
+---
+
+## Supported Drivers
+
+| Driver   | Purpose                                |
+| -------- | -------------------------------------- |
+| `openai` | AI-powered contextual translations     |
+| `google` | Fast traditional translations          |
+| `deepl`  | High-quality professional translations |
+| `ollama` | Local/self-hosted LLM translation      |
+
+---
+
+## OpenAI Driver (Recommended)
+
+The OpenAI driver is optimized for large-scale translation workloads.
+
+### Features
+
+* JSON-mode batch translation
+* Chunked translation pipelines
+* Concurrent processing
+* Retry handling
+* API timeout protection
+* Structured response validation
+
+### Batch Optimization
+
+Instead of translating one string at a time:
+
+```php
+[
+    "title" => "Welcome",
+    "button" => "Read More",
+    "footer" => "Contact Us",
+]
+```
+
+LaraGlot sends grouped translation chunks to dramatically reduce:
+
+* API requests
+* latency
+* token usage
+* overall cost
+
+---
+
+## Google / DeepL Drivers
+
+Traditional translation APIs optimized for:
+
+* speed
+* consistency
+* lower latency
+* deterministic outputs
+
+Ideal for applications needing high-volume static translations.
+
+---
+
+## Ollama Driver
+
+Run translations entirely locally using self-hosted LLMs.
+
+Perfect for:
+
+* private deployments
+* air-gapped systems
+* sensitive data
+* cost reduction
+
+---
+
+# Model Setup
+
+LaraGlot works alongside `spatie/laravel-translatable`.
+
+---
+
+## 1. Add the Traits
 
 ```php
 namespace App\Models;
@@ -169,9 +306,6 @@ class Page extends Model
 {
     use HasTranslations, HasSmartTranslations;
 
-    /**
-     * Attributes stored as translatable JSON by spatie/laravel-translatable.
-     */
     public array $translatable = [
         'title',
         'content',
@@ -179,9 +313,6 @@ class Page extends Model
         'meta_description',
     ];
 
-    /**
-     * Required by LaraGlot — returns the list of attributes to translate.
-     */
     public function getTranslatableAttributes(): array
     {
         return $this->translatable;
@@ -189,9 +320,13 @@ class Page extends Model
 }
 ```
 
-### 2. Models with Sections (Page Builder Support)
+---
 
-If your model has a `sections` relationship (e.g. a Filament page builder), LaraGlot will automatically recurse into each section's `content` JSON and translate any `{ "en": "..." }` style translation maps it finds:
+## 2. Page Builder & Recursive Translation
+
+LaraGlot automatically detects nested structures and recursively traverses them.
+
+Example:
 
 ```php
 class Page extends Model
@@ -200,60 +335,185 @@ class Page extends Model
 
     public function sections(): HasMany
     {
-        return $this->hasMany(PageSection::class)->orderBy('sort_order');
+        return $this->hasMany(PageSection::class)
+            ->orderBy('sort_order');
     }
 }
 ```
 
-The `SmartTranslationService` will skip non-translatable keys automatically (`id`, `slug`, `url`, `image`, `icon`, `sort_order`, `layout_type`, and similar structural keys).
+---
 
-### 3. Automatic SEO Population
+## What Gets Translated?
 
-When a model has a `title` attribute, LaraGlot will automatically populate empty `meta_title` and `meta_description` fields from the English title before translation — ensuring SEO fields are never blank.
+LaraGlot intelligently translates:
+
+✅ Nested arrays
+✅ JSON blocks
+✅ Builder content
+✅ Rich text HTML
+✅ `{ "en": "..." }` language maps
+✅ Repeater blocks
+✅ Filament Builder sections
 
 ---
 
-## Language File Translation
+## What Gets Ignored?
 
-LaraGlot translates your `lang/en/*.php` files into all configured locales, preserving placeholder syntax and pluralization:
-
-### Placeholder Protection
-
-Laravel placeholders (`:name`, `:count`, `:attribute`) are wrapped in `<span translate="no">` before being sent to the translation API, then cleanly restored afterwards. This prevents translations like `"Bonjour :nom"` breaking your application.
-
-### Pluralization Support
-
-Pipe-delimited plural strings are processed segment by segment:
+Structural/system keys are automatically skipped:
 
 ```php
-// Input
-'items' => '{0} No items|[1,19] :count items|[20,*] :count items (bulk)',
-
-// Output (French)
-'items' => '{0} Aucun article|[1,19] :count articles|[20,*] :count articles (en vrac)',
+[
+    'id',
+    'slug',
+    'url',
+    'image',
+    'layout_type',
+    'sort_order',
+]
 ```
 
-### Saving Output
-
-Translated files are written using short PHP array syntax and saved to `lang/{locale}/{filename}.php`, creating the directory if it does not exist.
+This prevents corruption of application logic and relationships.
 
 ---
 
-## Queue Setup
+## 3. SEO Auto-Population
 
-LaraGlot dispatches all heavy translation work to the queue so your web requests and UI stay responsive.
+If a model contains a `title` but empty SEO fields:
 
-### Start a Worker
-
-```bash
-# Recommended: dedicated translations queue with fallback to default
-php artisan queue:work --queue=translations,default
-
-# With supervisor-friendly options (timeout matches job timeout of 600s)
-php artisan queue:work --queue=translations,default --timeout=620 --tries=3
+```php
+meta_title
+meta_description
 ```
 
-### Supervisor Configuration (Production)
+LaraGlot automatically pre-fills them from the English title before translation.
+
+This guarantees multilingual SEO completeness even when editors forget metadata.
+
+---
+
+# Language File Translation
+
+LaraGlot translates:
+
+```php
+lang/en/*.php
+```
+
+into every configured locale.
+
+---
+
+## Placeholder Protection
+
+Laravel placeholders are protected before sending content to the translator.
+
+### Input
+
+```php
+'hello' => 'Hello :name'
+```
+
+### Protected API Payload
+
+```html
+Hello <span translate="no">:name</span>
+```
+
+### Final Output
+
+```php
+'hello' => 'Bonjour :name'
+```
+
+This prevents engines from corrupting placeholders into invalid variants.
+
+---
+
+## Pluralization Support
+
+Pipe-delimited plural strings are translated segment-by-segment.
+
+### Input
+
+```php
+'items' => '{0} No items|[1,19] :count items|[20,*] :count items (bulk)'
+```
+
+### Output
+
+```php
+'items' => '{0} Aucun article|[1,19] :count articles|[20,*] :count articles (en vrac)'
+```
+
+---
+
+## PHP Array Preservation
+
+Files are:
+
+* flattened via `Arr::dot`
+* translated safely
+* rebuilt recursively
+* saved using short-array syntax
+
+Output is written to:
+
+```bash
+lang/{locale}/{file}.php
+```
+
+Directories are created automatically if missing.
+
+---
+
+# Queue Setup & Timeouts
+
+LaraGlot dispatches heavy translation work onto Laravel queues.
+
+This keeps:
+
+* web requests fast
+* Filament responsive
+* admin actions non-blocking
+
+---
+
+## Start a Queue Worker
+
+```bash
+php artisan queue:work --queue=translations,default
+```
+
+Recommended production command:
+
+```bash
+php artisan queue:work \
+    --queue=translations,default \
+    --timeout=620 \
+    --tries=3
+```
+
+---
+
+# Cascading Timeout Strategy
+
+Because AI providers can be slow, LaraGlot uses layered timeout protection.
+
+| Layer             | Setting                  | Default |
+| ----------------- | ------------------------ | ------- |
+| Queue Job         | `$timeout`               | `600s`  |
+| Concurrent Worker | `Concurrency::timeout()` | `300s`  |
+| HTTP Request      | `Http::timeout()`        | `120s`  |
+
+This prevents:
+
+* hanging workers
+* zombie jobs
+* stalled queue pipelines
+
+---
+
+## Supervisor Configuration
 
 ```ini
 [program:laraglot-worker]
@@ -266,85 +526,207 @@ redirect_stderr=true
 stdout_logfile=/var/log/supervisor/laraglot-worker.log
 ```
 
-### Job Behaviour
+---
 
-Both `TranslateModelJob` and `TranslateFilesJob` share the same resilience configuration:
+## Job Retry Behaviour
 
-| Setting | Value |
-|---|---|
-| `$tries` | `3` |
-| `$timeout` | `600s` (models) / `300s` (files) |
-| `backoff()` | `[30, 60, 120]` seconds |
+| Setting       | Value           |
+| ------------- | --------------- |
+| `$tries`      | `3`             |
+| `backoff()`   | `[30, 60, 120]` |
+| Model Timeout | `600s`          |
+| File Timeout  | `300s`          |
 
-If the translation API is rate-limiting, jobs will automatically retry with increasing delays before being marked as failed.
+If providers rate-limit requests, LaraGlot retries automatically with progressive delays.
 
 ---
 
-## Artisan Commands
+# Artisan Commands
 
-### `laraglot:files` — Translate PHP Language Files
+# `laraglot:sync`
 
-Dispatches `TranslateFilesJob` for every file × locale combination.
+Translate database models.
+
+---
+
+## Process All Models
 
 ```bash
-# Dispatch jobs for all files and all configured locales
-php artisan laraglot:files
-
-# Translate only a specific file
-php artisan laraglot:files messages
-
-# Target a single locale only
-php artisan laraglot:files --locale=fr
-
-# Overwrite files that already exist
-php artisan laraglot:files --force
-
-# Run synchronously (no queue — useful for CI pipelines)
-php artisan laraglot:files --sync
-
-# Combine flags
-php artisan laraglot:files messages --locale=es --force --sync
+php artisan laraglot:sync
 ```
 
-### `laraglot:sync` — Translate Database Models
+---
 
-Scans registered models and dispatches `TranslateModelJob` for each record that needs translation.
+## Process One Model
 
 ```bash
-# Process all models listed in config/lara-glot.php
-php artisan laraglot:sync
-
-# Process a specific model only
 php artisan laraglot:sync "App\Models\Page"
+```
 
-# Force re-translation of all records (ignores existing translations)
+---
+
+## Force Re-Translation
+
+```bash
 php artisan laraglot:sync --force
+```
 
-# Combine model + force
+---
+
+## Force Specific Model
+
+```bash
 php artisan laraglot:sync "App\Models\Post" --force
 ```
 
-The sync command uses chunked queries (`chunkById(100)`) and a progress bar to handle large tables safely without exhausting memory.
+---
+
+## Internal Optimizations
+
+The sync command uses:
+
+```php
+chunkById(100)
+```
+
+to safely process very large tables without memory exhaustion.
 
 ---
 
-## Filament Integration
+# `laraglot:files`
 
-### Admin Page — LaraGlot Manager
+Translate PHP language files.
 
-LaraGlot ships with a full Filament admin page at `/admin/lara-glot-manager`.
+---
 
-**Features:**
-- **Multi-file select** — choose one or many source files at once
-- **AI Preview** — synchronously translate a single file and display a diff table you can edit before saving
-- **Dispatch Jobs** — send selected files to the background queue without waiting
-- **Force Overwrite toggle** — control whether existing translations are replaced
-- **Sync All Files** (header action) — dispatch one job per file × locale for every configured combination
-- **Force Re-translate All** (header action) — same as above but overwrites all existing files
+## Translate Everything
 
-### Table Actions on Your Resources
+```bash
+php artisan laraglot:files
+```
 
-Add per-record and bulk translation triggers to any Filament resource:
+---
+
+## Single File
+
+```bash
+php artisan laraglot:files messages
+```
+
+---
+
+## Single Locale
+
+```bash
+php artisan laraglot:files --locale=fr
+```
+
+---
+
+## Force Overwrite
+
+```bash
+php artisan laraglot:files --force
+```
+
+---
+
+## Run Synchronously
+
+Useful for CI pipelines:
+
+```bash
+php artisan laraglot:files --sync
+```
+
+---
+
+## Combined Example
+
+```bash
+php artisan laraglot:files messages --locale=es --force --sync
+```
+
+---
+
+# Filament Integration
+
+LaraGlot ships with a full Filament admin interface.
+
+Default route:
+
+```bash
+/admin/lara-glot-manager
+```
+
+---
+
+# LaraGlot Manager Features
+
+## 1. Multi-File Selection
+
+Choose one or many language files simultaneously.
+
+---
+
+## 2. AI Translation Preview
+
+Synchronously translate a file and preview the output before saving.
+
+Features:
+
+* side-by-side diff table
+* editable translations
+* manual correction support
+* save reviewed output
+
+---
+
+## 3. Queue Dispatching
+
+Bulk-send translations to the background queue without waiting.
+
+Perfect for:
+
+* production deployments
+* large multilingual sites
+* mass content updates
+
+---
+
+## 4. Force Overwrite Toggle
+
+Control whether existing translations should be replaced.
+
+---
+
+## 5. Sync All Files
+
+Header action that dispatches:
+
+```text
+every file × every locale
+```
+
+combination automatically.
+
+---
+
+## 6. Force Re-Translate All
+
+Rebuild your entire translation set from scratch.
+
+Useful when:
+
+* changing AI providers
+* improving prompts
+* updating source English content
+
+---
+
+# Resource Table Actions
+
+Add translation buttons directly to your Filament resources.
 
 ```php
 use Filament\Tables;
@@ -362,7 +744,7 @@ public static function table(Table $table): Table
                 ->action(fn ($record) => TranslateModelJob::dispatch(
                     get_class($record),
                     $record->getKey(),
-                    true // force
+                    true
                 )->onQueue(config('lara-glot.queue'))),
         ])
         ->bulkActions([
@@ -383,85 +765,259 @@ public static function table(Table $table): Table
 
 ---
 
-## Caching
+# Caching Strategy
 
-LaraGlot uses a two-layer cache to keep API costs low and response times fast:
-
-### Layer 1 — RAM Cache (per request)
-
-Every translated string is stored in an in-memory array (`$localCache`) for the duration of the current PHP process. If the same string is encountered again in the same job or request, it is returned instantly with zero overhead.
-
-### Layer 2 — Persistent Cache (Redis / File)
-
-Results are stored in your configured Laravel cache driver under the key `lara-glot.translation.{hash}` where `{hash}` is an MD5 of the locale + source string. The default TTL is 30 days (configurable via `cache_expiry`).
-
-### Forcing a Cache Bust
-
-Pass `force: true` to any command, job, or the Filament Force Overwrite toggle. This calls `Cache::forget()` on the relevant key before re-translating, ensuring fresh results from the API.
+LaraGlot uses a two-layer cache architecture to minimize API usage.
 
 ---
 
-## Architecture
+## Layer 1 — RAM Cache
 
+Per-request in-memory storage:
+
+```php
+$localCache
 ```
+
+If the same string appears multiple times during one translation job, LaraGlot instantly reuses the result.
+
+---
+
+## Layer 2 — Persistent Cache
+
+Stored using Laravel's cache driver:
+
+* Redis
+* File
+* Memcached
+* Database
+
+Cache key format:
+
+```text
+lara-glot.translation.{hash}
+```
+
+Where `{hash}` is:
+
+```php
+md5(locale + source_string)
+```
+
+---
+
+## Cache Expiry
+
+Default:
+
+```php
+2592000 // 30 days
+```
+
+Configurable via:
+
+```php
+cache_expiry
+```
+
+---
+
+## Force Cache Busting
+
+Passing:
+
+```php
+--force
+```
+
+or enabling Force Overwrite:
+
+* clears cached entries
+* forces fresh API translations
+
+---
+
+# Architecture
+
+```text
 LaraGlot
 ├── Commands
-│   ├── TranslateFilesCommand     laraglot:files  — dispatches TranslateFilesJob
-│   └── DispatchTranslations      laraglot:sync   — dispatches TranslateModelJob
+│   ├── TranslateFilesCommand
+│   └── DispatchTranslations
 │
 ├── Jobs
-│   ├── TranslateFilesJob         Translates a single PHP file to one locale
-│   └── TranslateModelJob         Translates all translatable attributes on one model
+│   ├── TranslateFilesJob
+│   └── TranslateModelJob
+│
+├── Drivers
+│   ├── OpenAiDriver
+│   ├── GoogleDriver
+│   ├── DeepLDriver
+│   ├── OllamaDriver
+│   └── AbstractDriver
 │
 ├── Services
-│   ├── TranslationService        Core API wrapper — multi-layer caching, rate-limit protection
-│   ├── FileTranslationService    PHP file parsing, Arr::dot flattening, placeholder masking
-│   └── SmartTranslationService   Recursive model/section translation, SEO auto-population
+│   ├── TranslationService
+│   ├── FileTranslationService
+│   └── SmartTranslationService
 │
 ├── Traits
-│   └── HasSmartTranslations      Eloquent model trait — hooks into saved events
+│   └── HasSmartTranslations
 │
 └── Filament
     └── Pages
-        └── LaraGlotManager       Full admin UI — preview, edit, dispatch, sync
+        └── LaraGlotManager
 ```
-
-### Service Responsibilities
-
-**`TranslationService`**
-The single point of contact with the Google Translate API. Handles multi-layer caching, empty-string skipping, and force-refresh logic. Used by both `FileTranslationService` and `SmartTranslationService`.
-
-**`FileTranslationService`**
-Loads a PHP language file, flattens it with `Arr::dot`, masks placeholders, sends the flat array to `TranslationService::translateBatch()`, restores placeholders, and writes the result back to a nested PHP array file.
-
-**`SmartTranslationService`**
-The model translation engine. Recurses into translatable attributes, handles page-builder section JSON, auto-populates SEO fields, detects whether English content has changed since the last translation, and chunks large HTML blocks to avoid API limits.
 
 ---
 
-## Logging & Monitoring
+# Service Responsibilities
 
-All activity is written to `storage/logs/laravel.log`:
+## `TranslationService`
 
-| Emoji | Message | Meaning |
-|---|---|---|
-| 🚀 | `[LaraGlot] Translation Job Started` | Job was picked up by a worker |
-| ⏭️ | `[LaraGlot] Skipping (already exists)` | File exists and force is false |
-| 🌍 | `[LaraGlot] Translating [locale]: ...` | Live API call in progress |
-| ✅ | `[LaraGlot] Translation completed` | File or model saved successfully |
-| ⚠️ | `[LaraGlot] Model not found` | Record was deleted before job ran |
-| ❌ | `[LaraGlot] API Error [locale]: ...` | API call failed — job will retry |
+Core translation engine.
 
-Failed jobs after all retries are exhausted are written to the `failed_jobs` table. Inspect them with:
+Responsibilities:
+
+* API communication
+* caching
+* batching
+* retries
+* chunking
+* timeout handling
+* force refresh logic
+
+---
+
+## `FileTranslationService`
+
+Handles PHP language files.
+
+Responsibilities:
+
+* file parsing
+* `Arr::dot` flattening
+* placeholder masking
+* pluralization handling
+* nested array rebuilding
+
+---
+
+## `SmartTranslationService`
+
+Recursive model translator.
+
+Responsibilities:
+
+* nested JSON traversal
+* Filament Builder recursion
+* SEO auto-population
+* change detection
+* HTML chunking
+* structural key skipping
+
+---
+
+# Logging & Monitoring
+
+All activity is logged to:
+
+```bash
+storage/logs/laravel.log
+```
+
+---
+
+## Log Events
+
+| Emoji | Message                       | Meaning                         |
+| ----- | ----------------------------- | ------------------------------- |
+| 🚀    | Translation Job Started       | Worker picked up the job        |
+| ⏭️    | Skipping Existing Translation | Translation already exists      |
+| 🌍    | Translating Chunk             | Active API request              |
+| ✅     | Translation Completed         | Successfully saved              |
+| ⚠️    | Model Not Found               | Record deleted before execution |
+| ❌     | API Error                     | Provider failure / timeout      |
+
+---
+
+# Failure Recovery
+
+Failed jobs are stored in Laravel's `failed_jobs` table.
+
+Inspect failures:
 
 ```bash
 php artisan queue:failed
+```
+
+Retry one job:
+
+```bash
 php artisan queue:retry {id}
+```
+
+Retry everything:
+
+```bash
 php artisan queue:retry all
 ```
 
 ---
 
-## License
+# Performance Optimizations
 
-The MIT License (MIT). Copyright © Tonydev. Developed with ❤️ for the Laravel community.
+LaraGlot is heavily optimized for large-scale applications.
+
+---
+
+## Smart Chunking
+
+Large HTML content is automatically split into manageable chunks before translation.
+
+Prevents:
+
+* token overflow
+* API payload failures
+* malformed responses
+
+---
+
+## Concurrent Translation
+
+Multiple chunks can be translated simultaneously for significant speed improvements.
+
+---
+
+## Change Detection
+
+LaraGlot detects whether source English content has changed before re-translating.
+
+This avoids:
+
+* unnecessary API usage
+* duplicate translations
+* wasted queue time
+
+---
+
+## Translation Deduplication
+
+If the same phrase appears across:
+
+* Pages
+* Posts
+* Products
+* Language files
+
+…the cached translation is reused globally.
+
+---
+
+# License
+
+The MIT License (MIT).
+
+Copyright © 2026 Tonydev.
+
+Built with ❤️ for the Laravel community.

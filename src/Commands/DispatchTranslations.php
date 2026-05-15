@@ -1,98 +1,51 @@
 <?php
 
 namespace Tonydev\LaraGlot\Commands;
-
 use Illuminate\Console\Command;
-use Tonydev\LaraGlot\Jobs\TranslateModelJob;
+
+use Tonydev\LaraGlot\Services\ModelTranslationManager;
 
 class DispatchTranslations extends Command
 {
-      /**
-       * The name and signature of the console command.
-       */
       protected $signature = 'laraglot:sync {model?} {--force : Force re-translation of all fields}';
-
-      /**
-       * The console command description.
-       */
       protected $description = 'Scan and dispatch translation jobs for models needing updates';
 
-      /**
-       * Execute the console command.
-       */
+      protected ModelTranslationManager $manager;
+
+      public function __construct(ModelTranslationManager $manager)
+      {
+            parent::__construct();
+            $this->manager = $manager;
+      }
+
       public function handle()
       {
             $force = $this->option('force');
             $targetModel = $this->argument('model');
+
+            // 1. Resolve which models to process
             $models = $targetModel ? [$targetModel] : config('lara-glot.models', []);
 
             if (empty($models)) {
                   $this->error("No models defined in lara-glot config, and no model argument provided.");
-                  return;
+                  return Command::FAILURE;
             }
 
-            foreach ($models as $modelClass) {
-                  if (!class_exists($modelClass)) {
-                        $this->warn("⚠️ Model [{$modelClass}] not found. Skipping.");
-                        continue;
-                  }
+            // 2. Dispatch using the Service
+            $this->info("🚀 Starting translation dispatch via LaraGlot Manager...");
 
-                  $query = $modelClass::withoutGlobalScopes();
-                  $count = $query->count();
+            try {
+                  // We use the Manager's class-based dispatch
+                  // This ensures logic like "withoutGlobalScopes" and "chunkById" is consistent
+                  $batchId = $this->manager->translateModelClasses($models, $force);
 
-                  if ($count === 0) {
-                        $this->info("ℹ️ No records found for {$modelClass}.");
-                        continue;
-                  }
+                  $this->info("✅ Success! Batch [{$batchId}] created.");
+                  $this->info("Jobs are now processing in the [" . config('lara-glot.queue', 'translations') . "] queue.");
 
-                  $this->info("🔍 Syncing {$count} records for {$modelClass}:");
-
-                  // We use the progress bar for UX and chunking for memory safety
-                  $this->withProgressBar($count, function ($bar) use ($query, $modelClass, $force) {
-                        $query->chunkById(100, function ($records) use ($bar, $modelClass, $force) {
-                              foreach ($records as $record) {
-                                    if ($force || $this->needsTranslation($record)) {
-                                          TranslateModelJob::dispatch(
-                                                $modelClass,
-                                                $record->getKey(),
-                                                $force
-                                          )->onQueue(config('lara-glot.queue', 'translations'));
-                                    }
-                                    $bar->advance();
-                              }
-                        });
-                  });
-
-                  $this->newLine(2);
+                  return Command::SUCCESS;
+            } catch (\Exception $e) {
+                  $this->error("❌ Failed to dispatch: " . $e->getMessage());
+                  return Command::FAILURE;
             }
-
-            $this->info('🚀 All translation jobs have been dispatched to the queue.');
-      }
-
-      /**
-       * Quick check to see if a model actually needs API work.
-       */
-      protected function needsTranslation($model): bool
-      {
-            if (!method_exists($model, 'getTranslatableAttributes')) {
-                  return false;
-            }
-
-            $locales = array_keys(config('lara-glot.languages', ['en' => 'English']));
-
-            foreach ($model->getTranslatableAttributes() as $field) {
-                  $translations = $model->getTranslations($field) ?? [];
-
-                  // Logic: If English exists, check if any other enabled locale is empty
-                  if (!empty($translations['en'])) {
-                        foreach ($locales as $locale) {
-                              if ($locale !== 'en' && empty($translations[$locale])) {
-                                    return true;
-                              }
-                        }
-                  }
-            }
-
-            return false;
       }
 }

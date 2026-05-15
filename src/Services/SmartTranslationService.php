@@ -22,52 +22,83 @@ class SmartTranslationService
        */
       public function translateModel(Model $model, bool $force = false): void
       {
-            // Use the facade to avoid global function issues in some environments
+            $modelName = class_basename($model);
+            $modelId = $model->id;
+
+            Log::info("🔍 [LaraGlot] Starting translation for $modelName ID $modelId");
+
+            // Check if model has translatable trait
+            if (!method_exists($model, 'getTranslatableAttributes')) {
+                  Log::error("❌ [LaraGlot] Model $modelName does not have HasTranslations trait");
+                  return;
+            }
+
             DB::connection()->disableQueryLog();
 
             $lockKey = 'lara-glot.translating.' . $model->getTable() . '.' . $model->id;
             $lock = Cache::lock($lockKey, 120);
 
             if (!$lock->get()) {
-                  Log::info("Translation skipped due to lock for {$model->getTable()} ID {$model->id}");
+                  Log::info("⏸️ [LaraGlot] Translation skipped due to lock for {$model->getTable()} ID {$model->id}");
                   return;
             }
 
             try {
                   $model->refresh();
+                  Log::info("📝 [LaraGlot] Model refreshed");
 
                   if (method_exists($model, 'sections')) {
                         $model->loadMissing('sections');
+                        Log::info("📚 [LaraGlot] Sections loaded");
                   }
 
                   if (method_exists($model, 'getTranslatableAttributes')) {
+                        $translatableAttrs = $model->getTranslatableAttributes();
+                        Log::info("📋 [LaraGlot] Translatable attributes: " . json_encode($translatableAttrs));
+
                         $this->ensureSeoPopulated($model);
 
                         $changed = false;
-                        foreach ($model->getTranslatableAttributes() as $field) {
+                        foreach ($translatableAttrs as $field) {
+                              Log::info("🔄 [LaraGlot] Processing field: $field");
+
                               $translations = $model->getTranslations($field);
-                              if (!is_array($translations))
+                              Log::info("📊 [LaraGlot] Current translations for $field: " . json_encode($translations));
+
+                              if (!is_array($translations)) {
+                                    Log::warning("⚠️ [LaraGlot] Field $field translations is not an array");
                                     continue;
+                              }
 
                               $updated = $this->processTranslationLogic($translations, $force);
+                              Log::info("✨ [LaraGlot] Updated translations for $field: " . json_encode($updated));
+
                               if ($updated !== $translations) {
+                                    Log::info("💾 [LaraGlot] Setting translations for $field");
                                     $model->setTranslations($field, $updated);
                                     $changed = true;
                               }
                         }
 
                         if ($changed) {
+                              Log::info("💾 [LaraGlot] Saving model with changes");
                               $model->saveQuietly();
+                              Log::info("✅ [LaraGlot] Model saved successfully");
+                        } else {
+                              Log::info("ℹ️ [LaraGlot] No changes detected, skipping save");
                         }
                   }
 
                   if (method_exists($model, 'sections')) {
+                        Log::info("📚 [LaraGlot] Starting section translation");
                         $this->translateSections($model, $force);
                   }
 
-                  Log::info("Translation completed for {$model->getTable()} ID {$model->id}");
+                  Log::info("🎉 [LaraGlot] Translation completed for $modelName ID $modelId");
             } catch (\Throwable $e) {
-                  Log::error("Translation failed for {$model->getTable()} ID {$model->id}: " . $e->getMessage());
+                  Log::error("❌ [LaraGlot] Translation failed for {$model->getTable()} ID {$model->id}: " . $e->getMessage(), [
+                        'trace' => $e->getTraceAsString(),
+                  ]);
                   throw $e;
             } finally {
                   optional($lock)->release();
@@ -76,7 +107,6 @@ class SmartTranslationService
 
       protected function ensureSeoPopulated(Model $model): void
       {
-            // This logic stays the same - it's great for automated SEO
             if (!$model->isTranslatableAttribute('title'))
                   return;
 
@@ -95,7 +125,6 @@ class SmartTranslationService
 
       protected function translateSections(Model $model, bool $force = false): void
       {
-            // FIXED: Pointing to lara-glot config
             $locales = array_keys(config('lara-glot.languages', ['en' => 'English']));
 
             foreach ($model->sections as $section) {
@@ -130,22 +159,34 @@ class SmartTranslationService
       protected function processTranslationLogic(array $translations, bool $force = false, ?array $locales = null): array
       {
             $en = $translations['en'] ?? null;
-            if (empty($en))
+            if (empty($en)) {
+                  Log::warning("⚠️ [LaraGlot] No English translation found");
                   return $translations;
+            }
 
-            // FIXED: Pointing to lara-glot config
             $locales = $locales ?? array_keys(config('lara-glot.languages', ['en' => 'English']));
             $lastEn = $translations['_en_original'] ?? null;
             $enWasModified = $force || ($en !== $lastEn);
+
+            Log::info("📌 [LaraGlot] Force: $force, EN Modified: " . ($enWasModified ? 'yes' : 'no'));
 
             foreach ($locales as $locale) {
                   if ($locale === 'en' || $this->shouldSkipKey($locale))
                         continue;
 
-                  if ($enWasModified || empty($translations[$locale])) {
-                        $translations[$locale] = is_array($en)
+                  $hasTranslation = !empty($translations[$locale]);
+
+                  if ($enWasModified || !$hasTranslation) {
+                        Log::info("🌐 [LaraGlot] Translating to $locale (has existing: " . ($hasTranslation ? 'yes' : 'no') . ")");
+
+                        $translated = is_array($en)
                               ? $this->translateNestedArray($en, $locale)
                               : $this->safeTranslate((string) $en, $locale);
+
+                        $translations[$locale] = $translated;
+                        Log::info("✅ [LaraGlot] $locale translation set");
+                  } else {
+                        Log::info("⏭️ [LaraGlot] Skipping $locale - already translated and source unchanged");
                   }
             }
 
@@ -175,7 +216,6 @@ class SmartTranslationService
             }
 
             try {
-                  // Your chunking logic is vital here for M4 stability
                   if (strlen($text) > 2000) {
                         return $this->translateInChunks($text, $locale);
                   }
@@ -186,7 +226,7 @@ class SmartTranslationService
                         'UTF-8'
                   );
             } catch (\Throwable $e) {
-                  Log::warning("Translation failed for locale {$locale}: " . $e->getMessage());
+                  Log::warning("⚠️ [LaraGlot] Translation failed for locale {$locale}: " . $e->getMessage());
                   return $text;
             }
       }
@@ -214,20 +254,9 @@ class SmartTranslationService
 
       protected function shouldSkipKey(string $key): bool
       {
-            return in_array($key, [
-                  'id',
-                  'slug',
-                  'url',
-                  'image',
-                  'icon',
-                  'primary_url',
-                  'secondary_url',
-                  'cta_url',
-                  'autoplay_speed',
-                  'sort_order',
-                  'layout_type',
-                  '_en_original',
-                  'en_original'
-            ]);
+            // Fetch from config, fallback to a sensible empty array if not set
+            $ignoredKeys = config('lara-glot.ignored_keys', []);
+
+            return in_array($key, $ignoredKeys);
       }
 }

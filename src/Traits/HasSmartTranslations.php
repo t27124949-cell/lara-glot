@@ -2,48 +2,24 @@
 
 namespace Tonydev\LaraGlot\Traits;
 
-// FIXED: Import the Job from the package namespace
-use Tonydev\LaraGlot\Jobs\TranslateModelJob;
-use Illuminate\Support\Facades\Log;
-
+/**
+ * Marks a model as supporting LaraGlot translations.
+ * 
+ * This trait is purely structural. It signals to LaraGlot that this model
+ * uses Spatie's HasTranslations and is eligible for translation via
+ * the ModelTranslationManager service.
+ * 
+ * Translation is EXPLICIT — use ModelTranslationManager::translateAsync()
+ * or translateSync() to trigger it. No automatic dispatch on save.
+ * 
+ * WHY NOT AUTO-DISPATCH?
+ * - Runtime flags don't survive queue serialization
+ * - Saved events fire multiple times, causing loops
+ * - Better to be explicit: the caller controls when to translate
+ * - Easier to debug and reason about
+ */
 trait HasSmartTranslations
 {
-      /**
-       * Prevents infinite loops when the Job saves the model.
-       */
-      public bool $skipTranslation = false;
-
-      /**
-       * Boot the trait and register the saved observer.
-       */
-      public static function bootHasSmartTranslations(): void
-      {
-            static::saved(function ($model) {
-                  // 1. Check for the skip flag (set by the Service/Job)
-                  if ($model->skipTranslation) {
-                        return;
-                  }
-
-                  // 2. Determine which fields to watch
-                  $translatableFields = method_exists($model, 'getTranslatableAttributes')
-                        ? $model->getTranslatableAttributes()
-                        : ['content', 'title', 'meta_title'];
-
-                  // 3. Only dispatch if relevant data changed or record is brand new
-                  if (!$model->wasChanged($translatableFields) && !$model->wasRecentlyCreated) {
-                        return;
-                  }
-
-                  // 4. Secure Dispatch
-                  TranslateModelJob::dispatch(
-                        get_class($model),
-                        $model->getKey(),
-                        false // $force = false
-                  )
-                        ->onQueue(config('lara-glot.queue', 'translations')) // FIXED: Use package config
-                        ->afterCommit();
-
-                  Log::info("🚀 [LaraGlot] Auto-dispatched translation for " . get_class($model) . " ID: " . $model->getKey());
-            });
-      }
+      // No logic here. This trait is just a marker.
+      // Use ModelTranslationManager in your code to translate.
 }

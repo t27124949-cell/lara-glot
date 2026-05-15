@@ -6,6 +6,7 @@ use Illuminate\Support\ServiceProvider;
 use Tonydev\LaraGlot\Commands\DispatchTranslations;
 use Tonydev\LaraGlot\Commands\TranslateFilesCommand;
 use Tonydev\LaraGlot\Services\FileTranslationService;
+use Tonydev\LaraGlot\Services\ModelTranslationManager;
 use Tonydev\LaraGlot\Services\SmartTranslationService;
 use Tonydev\LaraGlot\Services\TranslationService;
 
@@ -32,6 +33,13 @@ class LaraGlotServiceProvider extends ServiceProvider
             $this->app->singleton(SmartTranslationService::class, function ($app) {
                   return new SmartTranslationService(
                         $app->make(TranslationService::class)
+                  );
+            });
+
+            // Register ModelTranslationManager for explicit model translation dispatch
+            $this->app->singleton(ModelTranslationManager::class, function ($app) {
+                  return new ModelTranslationManager(
+                        $app->make(SmartTranslationService::class)
                   );
             });
       }
