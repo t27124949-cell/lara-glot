@@ -1,22 +1,56 @@
 {
     "name": "tonydev/lara-glot",
-    "description": "Smart Auto-Translation for Laravel Models with JSON/HTML support",
+    "description": "Smart auto-translation for Laravel — models, language files, and Filament UI. Supports Google, DeepL, OpenAI, and Ollama.",
     "type": "library",
     "license": "MIT",
-"require": {
-    "php": "^8.2",
-    "illuminate/support": "^11.0|^12.0|^13.0",
-    "illuminate/database": "^11.0|^12.0|^13.0",
-    "illuminate/http": "^11.0|^12.0|^13.0",
-    "guzzlehttp/guzzle": "^7.8",
-    "stichoza/google-translate-php": "^5.3"
-},
-"suggest": {
-    "cloudstudio/ollama-laravel": "Optional: enables local Ollama AI integration"
-},
+    "keywords": [
+        "laravel",
+        "translation",
+        "i18n",
+        "localization",
+        "deepl",
+        "openai",
+        "google-translate",
+        "ollama",
+        "filament"
+    ],
+    "authors": [
+        {
+            "name": "Tony Dev",
+            "role": "Developer"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "illuminate/bus": "^11.0|^12.0|^13.0",
+        "illuminate/cache": "^11.0|^12.0|^13.0",
+        "illuminate/concurrency": "^11.0|^12.0|^13.0",
+        "illuminate/console": "^11.0|^12.0|^13.0",
+        "illuminate/database": "^11.0|^12.0|^13.0",
+        "illuminate/filesystem": "^11.0|^12.0|^13.0",
+        "illuminate/http": "^11.0|^12.0|^13.0",
+        "illuminate/queue": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "pestphp/pest": "^3.0",
+        "pestphp/pest-plugin-laravel": "^3.0"
+    },
+    "suggest": {
+        "stichoza/google-translate-php": "^5.3 — Required for the Google driver (unofficial, no API key needed)",
+        "cloudstudio/ollama-laravel": "^2.0 — Required for the Ollama local-LLM driver",
+        "filament/filament": "^3.0 — Required for the LaraGlot Filament management UI",
+        "spatie/laravel-translatable": "^6.0 — Required for Eloquent model translation (HasTranslations trait)"
+    },
     "autoload": {
         "psr-4": {
             "Tonydev\\LaraGlot\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tonydev\\LaraGlot\\Tests\\": "tests/"
         }
     },
     "extra": {
@@ -24,6 +58,12 @@
             "providers": [
                 "Tonydev\\LaraGlot\\LaraGlotServiceProvider"
             ]
+        }
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
         }
     },
     "minimum-stability": "stable",

@@ -79,7 +79,8 @@ class TranslationService
                   return $text;
             }
 
-            $hash = $this->makeHash($target, $normalized);
+            // ✅ $source included in hash — prevents collision when source locale varies
+            $hash = $this->makeHash($target, $normalized, $source);
             $cacheKey = $this->makeCacheKey($hash);
 
             // ── Local cache ───────────────────────────────────────────────────────
@@ -87,9 +88,8 @@ class TranslationService
                   return $this->localCache[$hash];
             }
 
-            // ── Persistent cache ──────────────────────────────────────────────────
+            // ── Evict both layers when forcing ────────────────────────────────────
             if ($force) {
-                  // Evict both layers so the driver is always called.
                   unset($this->localCache[$hash]);
                   Cache::forget($cacheKey);
             }
@@ -99,14 +99,12 @@ class TranslationService
                         $cacheKey,
                         $this->cacheTtl(),
                         function () use ($normalized, $target, $source): string {
-
                               Log::info('[LaraGlot] Translating string.', [
                                     'target' => $target,
                                     'source' => $source,
                                     'preview' => mb_substr(strip_tags($normalized), 0, 60),
                               ]);
 
-                              // Drivers already normalise their output (html_entity_decode + trim).
                               return $this->driver->translate($normalized, $target, $source);
                         }
                   );
@@ -151,7 +149,7 @@ class TranslationService
             bool $force = false
       ): array {
             $output = [];
-            $needsTranslation = [];   // key → normalised source string for uncached entries
+            $needsTranslation = [];
 
             foreach ($texts as $key => $value) {
                   if (!is_string($value)) {
@@ -166,22 +164,20 @@ class TranslationService
                         continue;
                   }
 
-                  $hash = $this->makeHash($target, $normalized);
+                  // ✅ $source included in hash
+                  $hash = $this->makeHash($target, $normalized, $source);
                   $cacheKey = $this->makeCacheKey($hash);
 
-                  // ── Evict if forcing ──────────────────────────────────────────────
                   if ($force) {
                         unset($this->localCache[$hash]);
                         Cache::forget($cacheKey);
                   }
 
-                  // ── Local cache hit ───────────────────────────────────────────────
                   if (isset($this->localCache[$hash])) {
                         $output[$key] = $this->localCache[$hash];
                         continue;
                   }
 
-                  // ── Persistent cache hit ──────────────────────────────────────────
                   $cached = Cache::get($cacheKey);
 
                   if ($cached !== null) {
@@ -190,7 +186,6 @@ class TranslationService
                         continue;
                   }
 
-                  // ── Needs driver call ─────────────────────────────────────────────
                   $needsTranslation[$key] = $normalized;
             }
 
@@ -198,7 +193,6 @@ class TranslationService
                   return $this->restoreOrder($texts, $output);
             }
 
-            // ── Single driver call for all uncached strings ───────────────────────
             try {
                   $translated = $this->driver->translateBatch($needsTranslation, $target, $source);
             } catch (\Throwable $e) {
@@ -208,16 +202,16 @@ class TranslationService
                         'error' => $e->getMessage(),
                   ]);
 
-                  $translated = $needsTranslation; // graceful degradation: return originals
+                  $translated = $needsTranslation;
             }
 
-            // ── Persist results and populate output ───────────────────────────────
             $ttl = $this->cacheTtl();
 
             foreach ($needsTranslation as $key => $originalValue) {
                   $translatedValue = $translated[$key] ?? $originalValue;
 
-                  $hash = $this->makeHash($target, $originalValue);
+                  // ✅ $source included in hash
+                  $hash = $this->makeHash($target, $originalValue, $source);
                   $cacheKey = $this->makeCacheKey($hash);
 
                   Cache::put($cacheKey, $translatedValue, $ttl);
@@ -234,8 +228,8 @@ class TranslationService
       // ─────────────────────────────────────────────────────────────────────────
 
       /**
-       * Return the trimmed string, or null if it contains no translatable content.
-       * A string of pure HTML tags with no visible text (e.g. "<br>") is skipped.
+       * Return the trimmed string, or null if it contains no visible translatable text.
+       * Strings of pure HTML with no visible content (e.g. "<br>") are skipped.
        */
       protected function normalizeText(string $text): ?string
       {
@@ -249,12 +243,14 @@ class TranslationService
       }
 
       /**
-       * Stable, collision-resistant hash for a (locale, text) pair.
-       * xxhash would be faster but md5 requires no extension.
+       * Collision-resistant hash for a (source, target, text) triple.
+       *
+       * ✅ $source is included so translating 'fr' → 'de' and 'en' → 'de'
+       * for the same text produce different hashes — no wrong cache hit.
        */
-      protected function makeHash(string $target, string $text): string
+      protected function makeHash(string $target, string $text, string $source = 'en'): string
       {
-            return md5("{$target}|{$text}");
+            return md5("{$source}|{$target}|{$text}");
       }
 
       protected function makeCacheKey(string $hash): string
@@ -269,7 +265,6 @@ class TranslationService
       protected function rememberLocally(string $hash, string $value): void
       {
             if (count($this->localCache) >= $this->maxLocalCacheItems) {
-                  // Drop the oldest half; array_slice preserves insertion order.
                   $this->localCache = array_slice(
                         $this->localCache,
                         (int) ($this->maxLocalCacheItems / 2),
@@ -281,7 +276,7 @@ class TranslationService
       }
 
       /**
-       * Return the translated array with keys in the same order as the input.
+       * Return the translated array in the same key order as the original input.
        * Entries missing from $translated fall back to their original values.
        */
       protected function restoreOrder(array $original, array $translated): array
@@ -296,7 +291,7 @@ class TranslationService
       }
 
       /**
-       * Cache TTL as a DateTimeInterface, read once from config.
+       * Cache TTL as a DateTimeInterface, read from config.
        * Default: 30 days (2 592 000 seconds).
        */
       protected function cacheTtl(): \DateTimeInterface

@@ -53,13 +53,11 @@ class GoogleDriver extends AbstractTranslationDriver
 
       public function __construct()
       {
-            // Hydrate all shared properties declared in AbstractTranslationDriver
-            // from the driver-specific config namespace.
             $this->maxRetries = (int) config('lara-glot.drivers.google.max_retries', 3);
             $this->retryDelayMs = (int) config('lara-glot.drivers.google.retry_delay_ms', 300);
             $this->concurrencyLimit = max(1, (int) config('lara-glot.drivers.google.concurrency', 5));
             $this->cacheEnabled = (bool) config('lara-glot.drivers.google.cache_enabled', true);
-            $this->cacheTtl = (int) config('lara-glot.drivers.google.cache_ttl', 2_592_000); // matches global LARAGLOT_CACHE_EXPIRY default
+            $this->cacheTtl = (int) config('lara-glot.drivers.google.cache_ttl', 2_592_000);
             $this->batchDelayMs = (int) config('lara-glot.drivers.google.batch_delay_ms', 0);
       }
 
@@ -67,11 +65,6 @@ class GoogleDriver extends AbstractTranslationDriver
       // Driver identity
       // ─────────────────────────────────────────────────────────────────────────
 
-      /**
-       * Unique snake_case name for this driver.
-       * Used by the abstract class to build cache keys ("laraglot:google:...")
-       * and log tags ("[LaraGlot:Google] ...").
-       */
       protected function driverName(): string
       {
             return 'google';
@@ -95,6 +88,7 @@ class GoogleDriver extends AbstractTranslationDriver
        *  2. Check the cache — return the cached value if present.
        *  3. Protect placeholders (`:name`, URLs, no-translate spans).
        *  4. Call the unofficial Google endpoint with retry/back-off.
+       *     recordApiCall() is inside the closure so retries are counted accurately.
        *  5. Restore placeholders + normalize whitespace/entities.
        *  6. Write to cache, return to caller.
        *  7. On any failure: log the error and return the original string (graceful fallback).
@@ -118,16 +112,17 @@ class GoogleDriver extends AbstractTranslationDriver
             }
 
             // ── Protect dynamic tokens before sending to the API ──────────────────
-            // e.g. ":name", "https://example.com", <span translate="no">…</span>
-            // These would be mangled by the translation engine without protection.
             [$protected, $placeholders] = $this->protectPlaceholders($text);
 
             try {
                   // ── API call with retry ───────────────────────────────────────────
-                  $this->recordApiCall();
-
+                  // recordApiCall() is INSIDE the closure so every HTTP attempt —
+                  // including retries — increments the counter accurately.
                   $translated = $this->withRetry(
                         function () use ($protected, $source, $target): string {
+                              // Count every actual outbound HTTP attempt, not just the first.
+                              $this->recordApiCall();
+
                               // New instance per call = no shared state between concurrent tasks.
                               $client = new GoogleTranslate();
 
@@ -150,8 +145,6 @@ class GoogleDriver extends AbstractTranslationDriver
                   );
 
                   // ── Post-processing ───────────────────────────────────────────────
-                  // normalize() → trim whitespace + decode HTML entities
-                  // restorePlaceholders() → put back :name, URLs, etc.
                   $final = $this->restorePlaceholders(
                         $this->normalizeTranslated($translated),
                         $placeholders
@@ -163,9 +156,6 @@ class GoogleDriver extends AbstractTranslationDriver
                   return $final;
 
             } catch (Throwable $e) {
-                  // Graceful fallback: log the error but never crash the caller.
-                  // Returning $text means the UI shows the source-language string,
-                  // which is always better than a broken page or an exception.
                   Log::error("{$this->logTag()} Translation failed.", [
                         'target' => $target,
                         'source' => $source,
@@ -189,9 +179,13 @@ class GoogleDriver extends AbstractTranslationDriver
        *  2. Serve cache hits without building a task.
        *  3. Wrap each remaining string in a closure for Concurrency::run().
        *     Optionally inject a jitter delay to spread load.
-       *  4. Fan out all tasks via runConcurrentBatches() (inherited helper)
-       *     which chunks tasks into groups of $concurrencyLimit.
+       *  4. Fan out all tasks via runConcurrentBatches() (inherited helper).
        *  5. Merge results and restore original key order with ksort().
+       *
+       * NOTE: translateBatch() pre-checks the cache before creating a task,
+       * and translate() re-checks inside the task. The second check is a fast
+       * in-memory lookup and is kept intentionally — it guards against a cache
+       * write that may have occurred between the two checks in a concurrent run.
        *
        * @param  array<int|string, string> $texts
        * @return array<int|string, string>
@@ -206,7 +200,6 @@ class GoogleDriver extends AbstractTranslationDriver
 
             foreach ($texts as $key => $text) {
                   // ── Skip non-strings and blank values ─────────────────────────────
-                  // Preserve them in the result set as-is so key alignment is maintained.
                   if (!is_string($text) || trim($text) === '') {
                         $results[$key] = $text;
                         continue;
@@ -221,26 +214,16 @@ class GoogleDriver extends AbstractTranslationDriver
                   }
 
                   // ── Enqueue as a concurrent task ──────────────────────────────────
-                  // Each closure captures its own $text / $target / $source so there
-                  // is no shared mutable state between tasks.
                   $tasks[$key] = function () use ($text, $target, $source): string {
-                        // Optional jitter: spread requests over time to avoid bursty
-                        // traffic hitting the unofficial endpoint simultaneously.
                         if ($this->batchDelayMs > 0) {
                               usleep($this->batchDelayMs * 1_000);
                         }
 
-                        // Delegate to translate() which handles cache, placeholders,
-                        // retry, and graceful fallback all in one place.
                         return $this->translate($text, $target, $source);
                   };
             }
 
             // ── Run all pending tasks concurrently ────────────────────────────────
-            // runConcurrentBatches() is defined in AbstractTranslationDriver.
-            // It splits $tasks into chunks of $concurrencyLimit, calls
-            // Concurrency::run() on each chunk, and merges the results while
-            // preserving associative keys.
             if (!empty($tasks)) {
                   $batchResults = $this->runConcurrentBatches(
                         $tasks,
@@ -252,7 +235,6 @@ class GoogleDriver extends AbstractTranslationDriver
                   }
             }
 
-            // Restore the original key order before returning.
             ksort($results);
 
             return $results;

@@ -18,22 +18,24 @@ use Throwable;
  *
  * Because Ollama is self-hosted there is no per-call monetary cost, but latency
  * is higher than cloud APIs. The driver therefore:
- *  - Groups strings into chunks (default 10) to reduce round-trips.
+ *  - Groups strings into chunks (default 15) to reduce round-trips.
  *  - Fans out chunks concurrently (default 2 parallel) to use spare GPU/CPU.
  *  - Uses forced JSON mode (`->format('json')`) for reliable parsing.
- *  - Caches results aggressively (24 h default) to avoid re-translating.
+ *  - Caches results aggressively (30 days default) to avoid re-translating.
  *  - Retries with a 1-second base delay (local models can be slow to respond).
+ *  - Falls back to original strings on permanent failure (never throws to caller).
  *
  * ──────────────────────────────────────────────────────────────────────────────
  * Config keys  (lara-glot.drivers.ollama.*)
  * ──────────────────────────────────────────────────────────────────────────────
  *
  *  model          string  Ollama model tag to use.                  ('llama3')
- *  chunk_size     int     Strings per API call.                         (10)
+ *  chunk_size     int     Strings per API call.                         (15)
  *  max_retries    int     Retry attempts per chunk.                       (3)
+ *  retry_delay_ms int     Base delay between retries in ms.           (1000)
  *  concurrency    int     Max parallel chunk requests.                    (2)
  *  cache_enabled  bool    Whether to use the Laravel cache.           (true)
- *  cache_ttl      int     Cache lifetime in seconds.                (86400)
+ *  cache_ttl      int     Cache lifetime in seconds.              (2592000)
  */
 class OllamaDriver extends AbstractTranslationDriver
 {
@@ -45,9 +47,7 @@ class OllamaDriver extends AbstractTranslationDriver
 
       /**
        * How many strings to group into one API call.
-       *
-       * Larger chunks mean fewer round-trips but longer individual responses.
-       * Keep below the model's context window minus the system prompt overhead.
+       * Keep below the model's context window minus system prompt overhead.
        */
       protected int $chunkSize;
 
@@ -57,26 +57,19 @@ class OllamaDriver extends AbstractTranslationDriver
 
       public function __construct()
       {
-            // Hydrate all shared properties declared in AbstractTranslationDriver
-            // from the driver-specific config namespace.
             $this->model = (string) config('lara-glot.drivers.ollama.model', 'llama3');
-            $this->chunkSize = (int) config('lara-glot.drivers.ollama.chunk_size', 15);         // matches config default
+            $this->chunkSize = (int) config('lara-glot.drivers.ollama.chunk_size', 15);
             $this->maxRetries = (int) config('lara-glot.drivers.ollama.max_retries', 3);
-            $this->retryDelayMs = (int) config('lara-glot.drivers.ollama.retry_delay_ms', 1_000);     // local LLMs need more breathing room
+            $this->retryDelayMs = (int) config('lara-glot.drivers.ollama.retry_delay_ms', 1_000);
             $this->concurrencyLimit = (int) config('lara-glot.drivers.ollama.concurrency', 2);
             $this->cacheEnabled = (bool) config('lara-glot.drivers.ollama.cache_enabled', true);
-            $this->cacheTtl = (int) config('lara-glot.drivers.ollama.cache_ttl', 2_592_000); // matches global LARAGLOT_CACHE_EXPIRY default
+            $this->cacheTtl = (int) config('lara-glot.drivers.ollama.cache_ttl', 2_592_000);
       }
 
       // ─────────────────────────────────────────────────────────────────────────
       // Driver identity
       // ─────────────────────────────────────────────────────────────────────────
 
-      /**
-       * Unique snake_case name for this driver.
-       * Used by the abstract class to build cache keys ("laraglot:ollama:...")
-       * and log tags ("[LaraGlot:Ollama] ...").
-       */
       protected function driverName(): string
       {
             return 'ollama';
@@ -95,7 +88,8 @@ class OllamaDriver extends AbstractTranslationDriver
        *     - Full cache hit  → merge into $results immediately, no API call.
        *     - Any cache miss  → enqueue as a concurrent task.
        *  3. Fan all tasks out with runConcurrentBatches() (2 parallel by default).
-       *  4. Merge chunk results and restore original key order.
+       *  4. Merge chunk results — on permanent failure fall back to originals.
+       *  5. Restore original key order.
        *
        * WHY CHUNK-LEVEL CACHING (not string-level)?
        * Ollama translates a JSON array in one shot. If all strings in a chunk
@@ -118,27 +112,23 @@ class OllamaDriver extends AbstractTranslationDriver
             $chunks = array_chunk($texts, $this->chunkSize, true);
 
             foreach ($chunks as $index => $chunk) {
-                  // Build a cache key that represents the entire chunk as a unit.
                   $cacheKey = $this->buildChunkCacheKey($chunk, $target, $source);
 
                   // ── Full chunk cache hit ──────────────────────────────────────────
-                  // getFromCache() increments the hit counter and returns null on miss.
                   $cached = $this->getFromCache($cacheKey);
 
                   if ($cached !== null) {
-                        // The cached value is a JSON-encoded map of key → translated string.
                         $chunkResults = json_decode($cached, true);
 
                         if (is_array($chunkResults)) {
                               foreach ($chunkResults as $key => $value) {
                                     $results[$key] = $value;
                               }
-                              continue; // Skip to the next chunk — no API call needed.
+                              continue;
                         }
                   }
 
                   // ── Enqueue as a concurrent task ──────────────────────────────────
-                  // $index is the chunk index (0, 1, 2, …); $chunk is the slice of $texts.
                   $tasks[$index] = fn() => $this->translateChunkWithRetry(
                         $chunk,
                         $target,
@@ -148,23 +138,34 @@ class OllamaDriver extends AbstractTranslationDriver
             }
 
             // ── Run all pending chunks concurrently ───────────────────────────────
-            // runConcurrentBatches() is inherited from AbstractTranslationDriver.
-            // It processes $tasks in groups of $concurrencyLimit to avoid overloading
-            // the local Ollama server.
             if (!empty($tasks)) {
-                  // $concurrencyLimit IS the batch size — each batch runs fully in parallel,
-                  // and the next batch only starts once the current one completes.
                   $batchResults = $this->runConcurrentBatches($tasks, $this->concurrencyLimit);
 
-                  foreach ($batchResults as $chunkOutput) {
-                        // Each task returns an array of translated key → value pairs.
+                  foreach ($batchResults as $index => $chunkOutput) {
+                        // ── Graceful fallback on permanent failure ────────────────────
+                        // translateChunkWithRetry() re-throws after all retries are
+                        // exhausted. Concurrency::run() surfaces that as a Throwable in
+                        // the results array rather than crashing the whole batch.
+                        // We catch it here and return the original strings for this chunk.
+                        if ($chunkOutput instanceof Throwable) {
+                              Log::error(
+                                    "{$this->logTag()} Chunk {$index} failed permanently, using originals.",
+                                    ['error' => $chunkOutput->getMessage()]
+                              );
+
+                              foreach ($chunks[$index] as $key => $original) {
+                                    $results[$key] = $original;
+                              }
+
+                              continue;
+                        }
+
                         foreach ($chunkOutput as $key => $value) {
                               $results[$key] = $value;
                         }
                   }
             }
 
-            // Restore original key order before returning.
             ksort($results);
 
             return $results;
@@ -177,16 +178,12 @@ class OllamaDriver extends AbstractTranslationDriver
       /**
        * Attempt to translate a chunk, retrying up to $maxRetries times.
        *
-       * On success the translated map is JSON-encoded and stored in the cache
-       * under $cacheKey so the next call for the same chunk is a full hit.
-       *
-       * On final failure, withRetry() re-throws the last exception, which bubbles
-       * up through runConcurrentBatches() and is ultimately caught by the caller.
+       * On success the translated map is JSON-encoded and stored in the cache.
+       * On final failure, withRetry() re-throws — caught in translateBatch().
        *
        * @param  array<int|string, string> $chunk
        * @return array<int|string, string>
-       *
-       * @throws \Throwable
+       * @throws Throwable
        */
       protected function translateChunkWithRetry(
             array $chunk,
@@ -200,12 +197,15 @@ class OllamaDriver extends AbstractTranslationDriver
 
                         // Cache the entire chunk as a JSON-encoded map.
                         // JSON encoding preserves non-integer keys (unlike serialize()).
-                        $this->putInCache($cacheKey, json_encode($translated, JSON_UNESCAPED_UNICODE));
+                        $this->putInCache(
+                              $cacheKey,
+                              json_encode($translated, JSON_UNESCAPED_UNICODE)
+                        );
 
                         return $translated;
                   },
                   $this->maxRetries,
-                  $this->retryDelayMs, // from config: lara-glot.drivers.ollama.retry_delay_ms
+                  $this->retryDelayMs,
                   ':Ollama'
             );
       }
@@ -218,46 +218,53 @@ class OllamaDriver extends AbstractTranslationDriver
        * Send one chunk to Ollama and parse its JSON response.
        *
        * FLOW:
-       *  1. Encode the chunk values as a JSON array (ordered, no key info).
-       *  2. Ask Ollama using format('json') to guarantee a parseable response.
-       *  3. Strip any residual markdown fences (some models ignore format:'json').
-       *  4. Decode the JSON and validate length matches input.
-       *  5. Re-map decoded values back onto original keys.
+       *  1. Protect placeholders (:name, URLs, <span translate="no">) so the
+       *     model receives opaque tokens it cannot mangle.
+       *  2. Encode protected values as a JSON array and send to Ollama.
+       *  3. Decode the response via DecodesJsonResponse trait (handles fences,
+       *     BOM, envelope objects, etc.).
+       *  4. Validate response length matches input.
+       *  5. Re-map decoded values onto original keys + restore placeholders.
        *
        * Throws on any error so withRetry() can catch and re-attempt.
        *
        * @param  array<int|string, string> $chunk
        * @return array<int|string, string>
-       *
-       * @throws \Throwable
+       * @throws Throwable
        */
       protected function translateChunk(
             array $chunk,
             string $target,
             string $source
       ): array {
-            // Separate the original keys from the values so we can re-map later.
-            // Ollama only gets the values (as a plain JSON array); keys are internal.
-            $values = array_values($chunk);
             $keys = array_keys($chunk);
+            $values = array_values($chunk);
 
-            $jsonInput = json_encode($values, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+            // ── Protect placeholders BEFORE sending to Ollama ─────────────────────
+            // Replaces :name → __VAR_0__, URLs → __URL_1__, etc.
+            // The prompt also instructs the model to leave these tokens alone, but
+            // placeholder protection is the reliable guarantee — prompts are not.
+            $protectedValues = [];
+            $placeholderMaps = [];
+
+            foreach ($values as $i => $text) {
+                  [$protectedValues[$i], $placeholderMaps[$i]] = $this->protectPlaceholders($text);
+            }
+
+            $jsonInput = json_encode($protectedValues, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
             try {
                   // ── Outbound API call ─────────────────────────────────────────────
                   $this->recordApiCall();
 
                   $response = Ollama::model($this->model)
-                        // format('json') instructs Ollama to constrain its output to
-                        // valid JSON — critical for reliable automated parsing.
+                        // format('json') constrains output to valid JSON.
                         ->format('json')
                         ->prompt($this->buildPrompt($source, $target, $jsonInput))
                         ->options([
-                              // temperature 0 = deterministic output; we want consistency,
-                              // not creative variation, for translation.
+                              // temperature 0 = deterministic, consistent translations.
                               'temperature' => 0,
-                              // Enough context for a reasonably large chunk; adjust if
-                              // you increase $chunkSize significantly.
+                              // Enough context for a reasonably sized chunk.
                               'num_ctx' => 2048,
                         ])
                         ->ask();
@@ -265,33 +272,29 @@ class OllamaDriver extends AbstractTranslationDriver
                   // ── Response extraction ───────────────────────────────────────────
                   $raw = trim((string) ($response['response'] ?? ''));
 
-                  // Some models add ```json … ``` fences even when format:'json' is set.
-                  // Strip them so json_decode() does not choke on the backtick wrapping.
-                  $raw = preg_replace('/^```json\s*|\s*```$/i', '', $raw);
-
-                  // decodeJsonResponse() is provided by the DecodesJsonResponse trait
-                  // and throws a descriptive RuntimeException on decode failure.
+                  // decodeJsonResponse() (from DecodesJsonResponse trait) handles:
+                  // markdown fences, BOM, CRLF, envelope objects, re-indexing.
+                  // No need to manually strip fences here — the trait does it.
                   $decoded = $this->decodeJsonResponse($raw, 'Ollama');
 
                   // ── Validation ────────────────────────────────────────────────────
-                  // The model must return exactly as many strings as we sent.
-                  // A count mismatch means the response is unusable; throw to retry.
                   if (!is_array($decoded) || count($decoded) !== count($values)) {
-                        throw new \RuntimeException(
-                              sprintf(
-                                    'Ollama returned %d items; expected %d.',
-                                    is_array($decoded) ? count($decoded) : 0,
-                                    count($values)
-                              )
-                        );
+                        throw new \RuntimeException(sprintf(
+                              'Ollama returned %d item(s); expected %d.',
+                              is_array($decoded) ? count($decoded) : 0,
+                              count($values)
+                        ));
                   }
 
-                  // ── Re-map onto original keys ─────────────────────────────────────
+                  // ── Re-map onto original keys + restore placeholders ───────────────
                   $mapped = [];
 
                   foreach ($keys as $i => $originalKey) {
-                        // normalizeTranslated() trims whitespace and decodes HTML entities.
-                        $mapped[$originalKey] = $this->normalizeTranslated($decoded[$i]);
+                        $normalized = $this->normalizeTranslated($decoded[$i]);
+                        $mapped[$originalKey] = $this->restorePlaceholders(
+                              $normalized,
+                              $placeholderMaps[$i]
+                        );
                   }
 
                   return $mapped;
@@ -315,17 +318,8 @@ class OllamaDriver extends AbstractTranslationDriver
       /**
        * Build the Ollama prompt for a translation chunk.
        *
-       * DESIGN NOTES:
-       *  - Keep the prompt short when using format:'json'. Long, elaborate prompts
-       *    cause some models to wrap their reply in prose before the JSON object.
-       *  - Explicitly mention placeholder tokens (:name, __VAR_N__) so the model
-       *    knows NOT to translate them.
-       *  - Instruct the model to preserve order — the re-mapping step depends on it.
-       *
-       * @param  string $source     Source language code (e.g. "en").
-       * @param  string $target     Target language code (e.g. "fr").
-       * @param  string $jsonInput  JSON-encoded array of strings to translate.
-       * @return string
+       * Keep it short — long prompts cause some models to wrap their reply in
+       * prose before the JSON object, defeating format('json').
        */
       private function buildPrompt(string $source, string $target, string $jsonInput): string
       {
@@ -354,6 +348,10 @@ PROMPT;
        * We JSON-encode the chunk (including its original keys) before hashing so
        * that the same strings in a different order produce a different cache key —
        * order matters for the re-mapping step.
+       *
+       * NOTE: md5() is used here (not sha256) because the chunk key is never
+       * stored persistently as a user-facing identifier — it is purely an
+       * internal cache lookup key, and md5 is faster for that purpose.
        *
        * @param  array<int|string, string> $chunk
        */

@@ -54,7 +54,7 @@ trait DecodesJsonResponse
 
             // ── 6. Unwrap envelope objects: {"translations": [...]} etc. ──────────
             //    LLMs sometimes wrap the array in a single-key object despite instructions.
-            if (is_array($decoded) && !array_is_list($decoded)) {
+            while (is_array($decoded) && !array_is_list($decoded) && count($decoded) === 1) {
                   $decoded = reset($decoded);
             }
 

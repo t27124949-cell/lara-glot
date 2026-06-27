@@ -30,14 +30,18 @@ use Illuminate\Support\Facades\Log;
  *  api_key        string  Provider API key.                    (env OPENAI_API_KEY)
  *  model          string  Chat model to use.                        ('gpt-4o-mini')
  *  base_url       string  API base URL.               ('https://api.openai.com/v1')
- *  chunk_size     int     Strings per API call.                             (20)
+ *  chunk_size     int     Strings per API call.                             (30)
  *  max_retries    int     Retry attempts per chunk.                           (3)
+ *  retry_delay_ms int     Base delay between retries in ms.                (500)
  *  concurrency    int     Max parallel chunk requests.                        (3)
  *  cache_enabled  bool    Whether to use the Laravel cache.               (true)
- *  cache_ttl      int     Cache lifetime in seconds.                     (86400)
+ *  cache_ttl      int     Cache lifetime in seconds.                  (2592000)
  */
 class OpenAiDriver extends AbstractTranslationDriver
 {
+      /** Correct log label — avoids ucfirst() producing "Openai" instead of "OpenAI". */
+      protected string $logName = 'OpenAI';
+
       /** Provider API key. */
       protected string $apiKey;
 
@@ -49,10 +53,7 @@ class OpenAiDriver extends AbstractTranslationDriver
 
       /**
        * How many strings to group into one chat-completion call.
-       *
-       * Keep this low enough that the prompt + response fits inside the model's
-       * context window. 20 is a safe default for most models; raise it for
-       * high-context models (e.g. gpt-4o with 128 k tokens).
+       * Keep low enough that prompt + response fits inside the model's context window.
        */
       protected int $chunkSize;
 
@@ -62,43 +63,28 @@ class OpenAiDriver extends AbstractTranslationDriver
 
       public function __construct()
       {
-            $this->apiKey = (string) config(
-                  'lara-glot.drivers.openai.api_key',
-                  env('OPENAI_API_KEY', '')
-            );
-
-            $this->model = (string) config(
-                  'lara-glot.drivers.openai.model',
-                  'gpt-4o-mini'
-            );
+            // Config already calls env() internally — no need to double-wrap.
+            $this->apiKey = (string) config('lara-glot.drivers.openai.api_key', '');
+            $this->model = (string) config('lara-glot.drivers.openai.model', 'gpt-4o-mini');
 
             // Strip trailing slash so we can safely append "/chat/completions".
             $this->baseUrl = rtrim(
-                  (string) config(
-                        'lara-glot.drivers.openai.base_url',
-                        'https://api.openai.com/v1'
-                  ),
+                  (string) config('lara-glot.drivers.openai.base_url', 'https://api.openai.com/v1'),
                   '/'
             );
 
-            // Shared properties declared in AbstractTranslationDriver.
-            $this->chunkSize = (int) config('lara-glot.drivers.openai.chunk_size', 20);
+            $this->chunkSize = (int) config('lara-glot.drivers.openai.chunk_size', 30);
             $this->maxRetries = (int) config('lara-glot.drivers.openai.max_retries', 3);
             $this->retryDelayMs = (int) config('lara-glot.drivers.openai.retry_delay_ms', 500);
             $this->concurrencyLimit = (int) config('lara-glot.drivers.openai.concurrency', 3);
             $this->cacheEnabled = (bool) config('lara-glot.drivers.openai.cache_enabled', true);
-            $this->cacheTtl = (int) config('lara-glot.drivers.openai.cache_ttl', 2_592_000); // matches global LARAGLOT_CACHE_EXPIRY default
+            $this->cacheTtl = (int) config('lara-glot.drivers.openai.cache_ttl', 2_592_000);
       }
 
       // ─────────────────────────────────────────────────────────────────────────
       // Driver identity
       // ─────────────────────────────────────────────────────────────────────────
 
-      /**
-       * Unique snake_case name for this driver.
-       * Used by the abstract class to build cache keys ("laraglot:openai:...")
-       * and log tags ("[LaraGlot:Openai] ...").
-       */
       protected function driverName(): string
       {
             return 'openai';
@@ -119,9 +105,9 @@ class OpenAiDriver extends AbstractTranslationDriver
        *  5. Merge all results and restore the original key order.
        *
        * WHY STRING-LEVEL CACHING?
-       * OpenAI is billed per token. Caching at the string level means a single
-       * changed string in a batch does not cause a full chunk re-translation.
-       * This is important for incremental language-file updates.
+       * OpenAI is billed per token. String-level caching means a single changed
+       * string does not invalidate the whole chunk — important for incremental
+       * language-file updates.
        *
        * @param  array<int|string, string> $texts
        * @return array<int|string, string>
@@ -132,17 +118,15 @@ class OpenAiDriver extends AbstractTranslationDriver
             string $source = 'en'
       ): array {
             $results = [];
-            $pending = []; // strings that need an API call (cache-missed)
+            $pending = [];
 
             // ── Pass 1: Serve cache hits ──────────────────────────────────────────
             foreach ($texts as $key => $text) {
-                  // Preserve blank / non-string values without touching the API.
                   if (!is_string($text) || trim($text) === '') {
                         $results[$key] = $text;
                         continue;
                   }
 
-                  // getFromCache() increments hit/miss counters automatically.
                   $cached = $this->getFromCache($this->getCacheKey($text, $target, $source));
 
                   if ($cached !== null) {
@@ -162,24 +146,19 @@ class OpenAiDriver extends AbstractTranslationDriver
             $tasks = [];
 
             foreach ($chunks as $index => $chunk) {
-                  // Closures capture their own $chunk — no shared mutable state
-                  // between parallel tasks.
                   $tasks[$index] = fn() => $this->translateChunk($chunk, $target, $source);
             }
 
             // ── Pass 3: Run all chunks concurrently ───────────────────────────────
-            // runConcurrentBatches() is inherited from AbstractTranslationDriver.
-            // $concurrencyLimit IS the batch size — each batch runs fully in parallel,
-            // and the next batch only starts once the current one completes.
             $batchResults = $this->runConcurrentBatches($tasks, $this->concurrencyLimit);
 
-            // ── Pass 4: Merge chunk outputs and write individual strings to cache ──
+            // ── Pass 4: Merge chunk outputs + write individual strings to cache ────
             foreach ($batchResults as $chunkOutput) {
                   foreach ($chunkOutput as $key => $translated) {
                         $results[$key] = $translated;
 
-                        // Cache each string individually so future requests for the
-                        // same text — even in a different batch — get an instant hit.
+                        // Cache against the original (unprotected) text so any future
+                        // lookup — single-string or batch — gets an instant hit.
                         if (is_string($translated)) {
                               $this->putInCache(
                                     $this->getCacheKey($pending[$key], $target, $source),
@@ -202,12 +181,12 @@ class OpenAiDriver extends AbstractTranslationDriver
        * Send one chunk to the chat-completion endpoint and return a key-preserving map.
        *
        * FLOW:
-       *  1. JSON-encode the chunk values (only values — keys are internal).
-       *  2. POST to /chat/completions with the system prompt and JSON input.
-       *  3. Extract and clean the model's reply.
-       *  4. Decode the JSON array and validate the element count.
-       *  5. Re-map decoded values onto the original keys.
-       *  6. On permanent failure, return the original strings (graceful fallback).
+       *  1. Protect placeholders (:name, URLs, <span translate="no">) → opaque tokens.
+       *  2. JSON-encode the protected values.
+       *  3. POST to /chat/completions with system prompt + JSON input.
+       *  4. Decode the response via DecodesJsonResponse trait.
+       *  5. Validate element count, re-map onto original keys, restore placeholders.
+       *  6. On permanent failure: return original strings (graceful fallback).
        *
        * @param  array<int|string, string> $chunk
        * @return array<int|string, string>
@@ -220,14 +199,24 @@ class OpenAiDriver extends AbstractTranslationDriver
             $keys = array_keys($chunk);
             $values = array_values($chunk);
 
-            Log::info("{$this->logTag()} Sending chunk of " . count($chunk) . ' string(s) → ' . $target);
+            // ── Protect placeholders BEFORE sending to the model ──────────────────
+            // Builds $protectedValues (safe to send) and $placeholderMaps (for restore).
+            // This is the reliable guarantee — the system prompt is only a hint.
+            $protectedValues = [];
+            $placeholderMaps = [];
 
-            // ── JSON-encode input ─────────────────────────────────────────────────
-            // Encode before the retry loop so a JSON encoding failure is treated
-            // as a non-retryable error (bad input won't fix itself on retry).
+            foreach ($values as $i => $text) {
+                  [$protectedValues[$i], $placeholderMaps[$i]] = $this->protectPlaceholders($text);
+            }
+
+            Log::info("{$this->logTag()} Sending chunk of " . count($chunk) . " string(s) → {$target}");
+
+            // ── JSON-encode protected input ───────────────────────────────────────
+            // Done outside the retry closure — a JSON encoding failure is not
+            // retryable (bad input won't fix itself on the next attempt).
             try {
                   $jsonInput = json_encode(
-                        $values,
+                        $protectedValues,
                         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
                   );
             } catch (\JsonException $e) {
@@ -235,13 +224,13 @@ class OpenAiDriver extends AbstractTranslationDriver
                         'error' => $e->getMessage(),
                   ]);
 
-                  // Return originals immediately — retrying won't fix a bad input.
-                  return array_combine($keys, $values);
+                  return array_combine($keys, $values); // return originals immediately
             }
 
             try {
+                  // $placeholderMaps captured in use() so restore can happen inside.
                   return $this->withRetry(
-                        function () use ($keys, $values, $jsonInput, $target, $source): array {
+                        function () use ($keys, $values, $protectedValues, $placeholderMaps, $jsonInput, $target, $source): array {
 
                               // ── Outbound API call ─────────────────────────────────────
                               $this->recordApiCall();
@@ -250,8 +239,7 @@ class OpenAiDriver extends AbstractTranslationDriver
                                     ->timeout(90)
                                     ->post("{$this->baseUrl}/chat/completions", [
                                           'model' => $this->model,
-                                          // temperature 0 = deterministic, consistent output —
-                                          // critical for translation; we don't want creative variation.
+                                          // temperature 0 = deterministic, no creative variation.
                                           'temperature' => 0,
                                           'messages' => [
                                                 [
@@ -259,8 +247,6 @@ class OpenAiDriver extends AbstractTranslationDriver
                                                       'content' => $this->buildSystemPrompt($source, $target),
                                                 ],
                                                 [
-                                                      // Pass the JSON array as the user message so the
-                                                      // model treats it as the thing to translate.
                                                       'role' => 'user',
                                                       'content' => $jsonInput,
                                                 ],
@@ -273,30 +259,31 @@ class OpenAiDriver extends AbstractTranslationDriver
                                     );
                               }
 
-                              // Extract the assistant's reply — typically the only content block.
                               $raw = trim((string) $response->json('choices.0.message.content', ''));
 
-                              // decodeJsonResponse() is provided by the DecodesJsonResponse trait.
-                              // It strips markdown fences and throws on decode failure.
+                              // decodeJsonResponse() (DecodesJsonResponse trait) handles
+                              // fences, BOM, envelope objects, re-indexing.
                               $decoded = $this->decodeJsonResponse($raw, 'OpenAI');
 
                               // ── Validate response length ──────────────────────────────
-                              // The model must return exactly as many items as we sent.
-                              if (!is_array($decoded) || count($decoded) !== count($values)) {
+                              if (!is_array($decoded) || count($decoded) !== count($protectedValues)) {
                                     throw new \RuntimeException(sprintf(
                                           'OpenAI returned %s result(s) for %d input(s). Raw: %s',
                                           is_array($decoded) ? count($decoded) : 'null',
-                                          count($values),
+                                          count($protectedValues),
                                           mb_substr($raw, 0, 300)
                                     ));
                               }
 
-                              // ── Re-map onto original keys ─────────────────────────────
+                              // ── Re-map onto original keys + restore placeholders ──────
                               $mapped = [];
 
                               foreach ($keys as $i => $originalKey) {
-                                    // normalizeTranslated() trims + decodes HTML entities.
-                                    $mapped[$originalKey] = $this->normalizeTranslated($decoded[$i]);
+                                    $normalized = $this->normalizeTranslated($decoded[$i]);
+                                    $mapped[$originalKey] = $this->restorePlaceholders(
+                                          $normalized,
+                                          $placeholderMaps[$i]
+                                    );
                               }
 
                               Log::info("{$this->logTag()} Chunk translated successfully.");
@@ -304,19 +291,28 @@ class OpenAiDriver extends AbstractTranslationDriver
                               return $mapped;
                         },
                         $this->maxRetries,
-                        $this->retryDelayMs, // from config: lara-glot.drivers.openai.retry_delay_ms
+                        $this->retryDelayMs,
                         ':OpenAI'
                   );
 
             } catch (\Throwable $e) {
-                  // Permanent failure after all retries — return originals so the
-                  // caller always gets a usable array (never a thrown exception).
+                  // Permanent failure — restore placeholders on originals so callers
+                  // never receive raw __VAR_0__ tokens even in the fallback path.
                   Log::error(
                         "{$this->logTag()} Chunk failed permanently after {$this->maxRetries} attempt(s).",
                         ['error' => $e->getMessage()]
                   );
 
-                  return array_combine($keys, $values);
+                  $fallback = [];
+
+                  foreach ($keys as $i => $originalKey) {
+                        $fallback[$originalKey] = $this->restorePlaceholders(
+                              $values[$i] ?? '',
+                              $placeholderMaps[$i]
+                        );
+                  }
+
+                  return $fallback;
             }
       }
 
@@ -328,16 +324,10 @@ class OpenAiDriver extends AbstractTranslationDriver
        * Build the system prompt that scopes the model's behaviour.
        *
        * DESIGN NOTES:
-       *  - Temperature is already set to 0 in the API call. The prompt reinforces
-       *    determinism by saying "non-negotiable rules".
-       *  - Placeholder token patterns are listed explicitly so the model learns
-       *    to recognise and preserve the opaque keys used by ProtectsPlaceholders.
-       *  - Instructing the model to return ONLY a JSON array (no fences, no prose)
-       *    is essential — even a single stray word breaks JSON decoding.
-       *
-       * @param  string $source  Source language code (e.g. "en").
-       * @param  string $target  Target language code (e.g. "fr").
-       * @return string
+       *  - Temperature is already 0 in the API call; the prompt reinforces this.
+       *  - Opaque placeholder tokens (__VAR_N__, __URL_N__, __HTML_N__) are listed
+       *    explicitly so the model learns to recognise and preserve them.
+       *  - "ONLY a valid JSON array" is critical — stray prose breaks decoding.
        */
       private function buildSystemPrompt(string $source, string $target): string
       {

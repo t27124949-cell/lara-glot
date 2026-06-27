@@ -2,11 +2,7 @@
 
     {{ $this->form }}
 
-    {{--
-    ╔═══════════════════════════════════════════════════════════════════════════╗
-    ║  FILE ACTIONS                                                             ║
-    ╚═══════════════════════════════════════════════════════════════════════════╝
-    --}}
+    {{-- ── FILE ACTIONS ──────────────────────────────────────────────────────── --}}
     <x-filament::section class="mt-2">
         <x-slot name="heading">File Actions</x-slot>
         <x-slot name="description">
@@ -15,14 +11,12 @@
 
         <div class="flex flex-wrap items-center gap-3">
 
-            {{-- Batch-dispatch all selected files × locales --}}
             <x-filament::button color="warning" icon="heroicon-m-queue-list" wire:click="dispatchFileJobs"
                 wire:loading.attr="disabled" wire:target="dispatchFileJobs">
                 <span wire:loading.remove wire:target="dispatchFileJobs">Dispatch File Job(s)</span>
                 <span wire:loading wire:target="dispatchFileJobs">Queuing…</span>
             </x-filament::button>
 
-            {{-- Preview first file × locale via a single background job --}}
             <x-filament::button color="primary" icon="heroicon-m-sparkles" wire:click="generatePreview"
                 wire:loading.attr="disabled" wire:target="generatePreview" :disabled="$previewStatus === 'processing'">
                 <span wire:loading.remove wire:target="generatePreview">
@@ -39,13 +33,7 @@
         </p>
     </x-filament::section>
 
-    {{--
-    ╔═══════════════════════════════════════════════════════════════════════════╗
-    ║  FILE BATCH PROGRESS                                                      ║
-    ║  wire:poll.3000ms only renders when $fileBatchId is set, so it stops     ║
-    ║  polling the moment the batch finishes or is cancelled.                  ║
-    ╚═══════════════════════════════════════════════════════════════════════════╝
-    --}}
+    {{-- ── FILE BATCH PROGRESS ───────────────────────────────────────────────── --}}
     @if ($fileBatchId || ($fileBatchProgress && $fileBatchProgress['finished']))
         <div @if ($fileBatchId) wire:poll.3000ms="pollFileBatch" @endif>
             <x-filament::section class="mt-2">
@@ -53,12 +41,12 @@
                 <x-slot name="heading">
                     @if ($fileBatchProgress['finished'] ?? false)
                         @if (($fileBatchProgress['failed'] ?? 0) > 0)
-                            ⚠️ File Batch Complete (with errors)
+                            File Batch Complete — with errors
                         @else
-                            ✅ File Batch Complete
+                            File Batch Complete
                         @endif
                     @else
-                        ⏳ File Batch Running
+                        File Batch Running
                     @endif
                 </x-slot>
 
@@ -75,42 +63,35 @@
 
                     <div class="space-y-3">
 
-                        {{-- Label --}}
                         <p class="text-sm text-gray-600 dark:text-gray-300">
                             {{ $fp['label'] }}
                         </p>
 
-                        {{-- Progress bar --}}
-                        <div class="h-3 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+                        <div class="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
                             <div class="h-full rounded-full transition-all duration-500 {{ $barColor }}"
-                                style="width: {{ $fp['progress'] }}%"></div>
+                                style="width: {{ $fp['progress'] }}%">
+                            </div>
                         </div>
 
-                        {{-- Stats row --}}
-                        <div class="flex flex-wrap gap-4 text-sm">
-                            <span class="text-gray-500 dark:text-gray-400">
+                        <div class="flex flex-wrap gap-4 text-sm text-gray-500 dark:text-gray-400">
+                            <span>
                                 <strong class="text-gray-700 dark:text-gray-200">{{ $fp['progress'] }}%</strong>
                                 complete
                             </span>
                             <span class="text-success-600 dark:text-success-400">
-                                ✅ {{ $fp['processed'] }} done
+                                {{ $fp['processed'] }} done
                             </span>
                             @if ($fp['pending'] > 0)
-                                <span class="text-gray-500">
-                                    ⏳ {{ $fp['pending'] }} pending
-                                </span>
+                                <span>{{ $fp['pending'] }} pending</span>
                             @endif
                             @if ($fp['failed'] > 0)
                                 <span class="text-danger-600 dark:text-danger-400">
-                                    ❌ {{ $fp['failed'] }} failed
+                                    {{ $fp['failed'] }} failed
                                 </span>
                             @endif
-                            <span class="text-gray-400">
-                                of {{ $fp['total'] }} total
-                            </span>
+                            <span>of {{ $fp['total'] }} total</span>
                         </div>
 
-                        {{-- Cancel button (only while running) --}}
                         @if (!($fp['finished'] ?? false) && !($fp['cancelled'] ?? false) && $fileBatchId)
                             <div class="pt-1">
                                 <x-filament::button color="gray" size="sm" wire:click="cancelBatch('file')"
@@ -122,8 +103,8 @@
 
                         @if ($fp['failed'] > 0)
                             <p class="text-xs text-warning-600 dark:text-warning-400">
-                                Failed jobs can be retried with <code class="font-mono">php artisan queue:retry
-                                    all</code>
+                                Failed jobs can be retried with
+                                <code class="font-mono">php artisan queue:retry all</code>
                             </p>
                         @endif
 
@@ -134,11 +115,7 @@
         </div>
     @endif
 
-    {{--
-    ╔═══════════════════════════════════════════════════════════════════════════╗
-    ║  MODEL ACTIONS                                                            ║
-    ╚═══════════════════════════════════════════════════════════════════════════╝
-    --}}
+    {{-- ── MODEL ACTIONS ─────────────────────────────────────────────────────── --}}
     <x-filament::section class="mt-2">
         <x-slot name="heading">Model Actions</x-slot>
         <x-slot name="description">
@@ -156,16 +133,14 @@
         </div>
 
         <p class="mt-3 text-xs text-gray-400 dark:text-gray-500">
-            Each record is queued individually. Large tables are chunked in groups of 100 to protect memory.
-            Jobs run on the <code class="font-mono">[{{ config('lara-glot.queue', 'translations') }}]</code> queue.
+            Each record is queued individually. Large tables are chunked in groups of 100.
+            Jobs run on the
+            <code class="font-mono">[{{ config('lara-glot.queue', 'translations') }}]</code>
+            queue.
         </p>
     </x-filament::section>
 
-    {{--
-    ╔═══════════════════════════════════════════════════════════════════════════╗
-    ║  MODEL BATCH PROGRESS                                                     ║
-    ╚═══════════════════════════════════════════════════════════════════════════╝
-    --}}
+    {{-- ── MODEL BATCH PROGRESS ──────────────────────────────────────────────── --}}
     @if ($modelBatchId || ($modelBatchProgress && $modelBatchProgress['finished']))
         <div @if ($modelBatchId) wire:poll.3000ms="pollModelBatch" @endif>
             <x-filament::section class="mt-2">
@@ -173,12 +148,12 @@
                 <x-slot name="heading">
                     @if ($modelBatchProgress['finished'] ?? false)
                         @if (($modelBatchProgress['failed'] ?? 0) > 0)
-                            ⚠️ Model Batch Complete (with errors)
+                            Model Batch Complete — with errors
                         @else
-                            ✅ Model Batch Complete
+                            Model Batch Complete
                         @endif
                     @else
-                        ⏳ Model Batch Running
+                        Model Batch Running
                     @endif
                 </x-slot>
 
@@ -195,32 +170,29 @@
                             {{ $mp['label'] }}
                         </p>
 
-                        <div class="h-3 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+                        <div class="h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
                             <div class="h-full rounded-full transition-all duration-500 {{ $barColor }}"
-                                style="width: {{ $mp['progress'] }}%"></div>
+                                style="width: {{ $mp['progress'] }}%">
+                            </div>
                         </div>
 
-                        <div class="flex flex-wrap gap-4 text-sm">
-                            <span class="text-gray-500 dark:text-gray-400">
+                        <div class="flex flex-wrap gap-4 text-sm text-gray-500 dark:text-gray-400">
+                            <span>
                                 <strong class="text-gray-700 dark:text-gray-200">{{ $mp['progress'] }}%</strong>
                                 complete
                             </span>
                             <span class="text-success-600 dark:text-success-400">
-                                ✅ {{ $mp['processed'] }} done
+                                {{ $mp['processed'] }} done
                             </span>
                             @if ($mp['pending'] > 0)
-                                <span class="text-gray-500">
-                                    ⏳ {{ $mp['pending'] }} pending
-                                </span>
+                                <span>{{ $mp['pending'] }} pending</span>
                             @endif
                             @if ($mp['failed'] > 0)
                                 <span class="text-danger-600 dark:text-danger-400">
-                                    ❌ {{ $mp['failed'] }} failed
+                                    {{ $mp['failed'] }} failed
                                 </span>
                             @endif
-                            <span class="text-gray-400">
-                                of {{ $mp['total'] }} total
-                            </span>
+                            <span>of {{ $mp['total'] }} total</span>
                         </div>
 
                         @if (!($mp['finished'] ?? false) && !($mp['cancelled'] ?? false) && $modelBatchId)
@@ -234,8 +206,8 @@
 
                         @if ($mp['failed'] > 0)
                             <p class="text-xs text-warning-600 dark:text-warning-400">
-                                Failed jobs can be retried with <code class="font-mono">php artisan queue:retry
-                                    all</code>
+                                Failed jobs can be retried with
+                                <code class="font-mono">php artisan queue:retry all</code>
                             </p>
                         @endif
 
@@ -246,26 +218,21 @@
         </div>
     @endif
 
-    {{--
-    ╔═══════════════════════════════════════════════════════════════════════════╗
-    ║  PREVIEW — PROCESSING SPINNER                                             ║
-    ║  Separate from batch progress — this is for the single-file preview job. ║
-    ╚═══════════════════════════════════════════════════════════════════════════╝
-    --}}
+    {{-- ── PREVIEW — PROCESSING ──────────────────────────────────────────────── --}}
     @if ($previewStatus === 'processing')
         <div wire:poll.3000ms="checkPreviewStatus">
             <x-filament::section class="mt-4">
                 <div class="flex items-center gap-4 py-1">
-                    <x-filament::loading-indicator class="h-8 w-8 text-primary-500" />
+                    <x-filament::loading-indicator class="h-6 w-6 text-primary-500" />
                     <div>
-                        <p class="text-sm font-semibold text-gray-700 dark:text-gray-200">
-                            Generating preview:
+                        <p class="text-sm font-medium text-gray-700 dark:text-gray-200">
+                            Translating
                             <span class="font-mono">{{ $previewFile }}.php</span>
                             &rarr;
-                            <span class="font-bold uppercase">{{ $previewLocale }}</span>
+                            <span class="font-semibold uppercase">{{ $previewLocale }}</span>
                         </p>
                         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                            Running on the queue worker. This page updates automatically.
+                            Running on the queue worker. This page updates automatically every 3 seconds.
                         </p>
                     </div>
                 </div>
@@ -273,17 +240,13 @@
         </div>
     @endif
 
-    {{--
-    ╔═══════════════════════════════════════════════════════════════════════════╗
-    ║  PREVIEW — ERROR BANNER                                                   ║
-    ╚═══════════════════════════════════════════════════════════════════════════╝
-    --}}
+    {{-- ── PREVIEW — ERROR ───────────────────────────────────────────────────── --}}
     @if ($previewStatus === 'failed' && $previewError)
         <x-filament::section class="mt-4">
             <div class="flex items-start gap-3 rounded-lg bg-danger-50 p-4 dark:bg-danger-900/20">
                 <x-heroicon-o-x-circle class="mt-0.5 h-5 w-5 shrink-0 text-danger-500" />
                 <div class="flex-1">
-                    <p class="text-sm font-semibold text-danger-700 dark:text-danger-400">Preview failed</p>
+                    <p class="text-sm font-medium text-danger-700 dark:text-danger-400">Preview failed</p>
                     <p class="mt-1 text-xs text-danger-600 dark:text-danger-300">{{ $previewError }}</p>
                     <button wire:click="resetPreview"
                         class="mt-2 text-xs text-danger-500 underline hover:text-danger-700">
@@ -294,11 +257,7 @@
         </x-filament::section>
     @endif
 
-    {{--
-    ╔═══════════════════════════════════════════════════════════════════════════╗
-    ║  PREVIEW — REVIEW TABLE                                                   ║
-    ╚═══════════════════════════════════════════════════════════════════════════╝
-    --}}
+    {{-- ── PREVIEW — REVIEW TABLE ────────────────────────────────────────────── --}}
     @if ($previewStatus === 'done' && !empty($editedTranslations))
         <x-filament::section class="mt-4">
 
@@ -306,7 +265,8 @@
                 Review:
                 <span class="font-mono font-normal">{{ $previewFile }}.php</span>
                 &rarr;
-                <span class="font-bold uppercase text-primary-600 dark:text-primary-400">{{ $previewLocale }}</span>
+                <span
+                    class="font-semibold uppercase text-primary-600 dark:text-primary-400">{{ $previewLocale }}</span>
             </x-slot>
 
             <x-slot name="description">
@@ -314,7 +274,7 @@
             </x-slot>
 
             <div class="overflow-x-auto">
-                <table class="w-full divide-y divide-gray-200 text-left dark:divide-white/5">
+                <table class="w-full divide-y divide-gray-200 text-left text-sm dark:divide-white/5">
                     <thead>
                         <tr class="bg-gray-50 dark:bg-white/5">
                             <th
@@ -331,9 +291,8 @@
                     <tbody class="divide-y divide-gray-100 dark:divide-white/5">
                         @foreach ($originalData as $key => $value)
                             <tr class="transition-colors hover:bg-gray-50 dark:hover:bg-white/5">
-                                <td class="px-4 py-3 align-top text-sm">
-                                    <span
-                                        class="mb-1 block font-mono text-xs text-gray-400">{{ $key }}</span>
+                                <td class="px-4 py-3 align-top">
+                                    <span class="mb-1 block font-mono text-xs text-gray-400">{{ $key }}</span>
                                     <span class="text-gray-700 dark:text-gray-200">{{ $value }}</span>
                                 </td>
                                 <td class="px-4 py-3 align-top">

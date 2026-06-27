@@ -1,51 +1,64 @@
 <?php
 
 namespace Tonydev\LaraGlot\Commands;
-use Illuminate\Console\Command;
 
+use Illuminate\Console\Command;
 use Tonydev\LaraGlot\Services\ModelTranslationManager;
 
 class DispatchTranslations extends Command
 {
-      protected $signature = 'laraglot:sync {model?} {--force : Force re-translation of all fields}';
+      protected $signature = 'laraglot:sync
+                              {model?             : Fully-qualified model class to translate (e.g. "App\\Models\\Page")}
+                              {--force            : Force re-translation of all fields, ignoring change detection}
+                              {--locale=*         : Only translate to this locale (repeatable: --locale=fr --locale=de)}';
+
       protected $description = 'Scan and dispatch translation jobs for models needing updates';
 
-      protected ModelTranslationManager $manager;
-
-      public function __construct(ModelTranslationManager $manager)
+      public function __construct(protected ModelTranslationManager $manager)
       {
             parent::__construct();
-            $this->manager = $manager;
       }
 
-      public function handle()
+      public function handle(): int
       {
-            $force = $this->option('force');
+            $force = (bool) $this->option('force');
             $targetModel = $this->argument('model');
+            $locales = (array) $this->option('locale'); // empty = all configured locales
 
-            // 1. Resolve which models to process
-            $models = $targetModel ? [$targetModel] : config('lara-glot.models', []);
+            // ── Resolve which models to process ──────────────────────────────────
+            $models = $targetModel
+                  ? [$targetModel]
+                  : config('lara-glot.models', []);
 
             if (empty($models)) {
-                  $this->error("No models defined in lara-glot config, and no model argument provided.");
-                  return Command::FAILURE;
+                  $this->error('No models defined in config/lara-glot.php and no model argument provided.');
+                  return self::FAILURE;
             }
 
-            // 2. Dispatch using the Service
-            $this->info("🚀 Starting translation dispatch via LaraGlot Manager...");
+            $this->info('Starting translation dispatch via LaraGlot…');
+
+            if (!empty($locales)) {
+                  $this->line('Target locales: ' . implode(', ', $locales));
+            } else {
+                  $this->line('Target locales: all configured');
+            }
 
             try {
-                  // We use the Manager's class-based dispatch
-                  // This ensures logic like "withoutGlobalScopes" and "chunkById" is consistent
-                  $batchId = $this->manager->translateModelClasses($models, $force);
+                  $batchId = $this->manager->translateModelClasses($models, $force, $locales);
 
-                  $this->info("✅ Success! Batch [{$batchId}] created.");
-                  $this->info("Jobs are now processing in the [" . config('lara-glot.queue', 'translations') . "] queue.");
+                  if ($batchId === null) {
+                        $this->warn('No records found in the specified model(s) — nothing dispatched.');
+                        return self::SUCCESS;
+                  }
 
-                  return Command::SUCCESS;
+                  $this->info("Batch [{$batchId}] created.");
+                  $this->line('Jobs are now processing on the [' . config('lara-glot.queue', 'translations') . '] queue.');
+
+                  return self::SUCCESS;
+
             } catch (\Exception $e) {
-                  $this->error("❌ Failed to dispatch: " . $e->getMessage());
-                  return Command::FAILURE;
+                  $this->error('Failed to dispatch: ' . $e->getMessage());
+                  return self::FAILURE;
             }
       }
 }

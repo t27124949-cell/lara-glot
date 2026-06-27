@@ -16,7 +16,11 @@ class TranslateFilePreviewJob implements ShouldQueue
 {
       use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-      public int $tries = 2;
+      /**
+       * 3 attempts total: 1 initial + 2 retries.
+       * Matches the backoff array which has 2 delay values.
+       */
+      public int $tries = 3;
       public int $timeout = 300;
 
       /**
@@ -39,27 +43,28 @@ class TranslateFilePreviewJob implements ShouldQueue
                   'previewKey' => $this->previewKey,
             ]);
 
-            // Mark job as "in progress" so the UI can distinguish
-            // "not started" from "running" from "done"
+            // Mark as "in progress" so the UI can distinguish
+            // "not started" from "running" from "done".
             Cache::put("{$this->previewKey}:status", 'processing', now()->addMinutes(10));
 
             try {
                   $sourcePath = lang_path("en/{$this->fileName}.php");
 
                   if (!file_exists($sourcePath)) {
-                        throw new \Exception("Source file [en/{$this->fileName}.php] not found.");
+                        throw new \RuntimeException(
+                              "Source file [en/{$this->fileName}.php] not found."
+                        );
                   }
 
                   $originalData = Arr::dot(include $sourcePath);
 
-                  $translatedValues = $service->translateBatch($originalData, $this->locale);
+                  // translateBatch() returns a keyed array (same keys as $originalData)
+                  // with translated values — no array_combine needed.
+                  $editedTranslations = $service->translateBatch($originalData, $this->locale);
 
-                  $editedTranslations = array_combine(
-                        array_keys($originalData),
-                        $translatedValues
-                  );
-
-                  // Store both arrays so the component can load them atomically
+                  // Store both arrays so the component can load them atomically.
+                  // Status is written LAST so the component only sees 'done'
+                  // once both data keys are already in cache.
                   Cache::put("{$this->previewKey}:original", $originalData, now()->addMinutes(30));
                   Cache::put("{$this->previewKey}:translations", $editedTranslations, now()->addMinutes(30));
                   Cache::put("{$this->previewKey}:status", 'done', now()->addMinutes(30));
@@ -71,7 +76,7 @@ class TranslateFilePreviewJob implements ShouldQueue
                   ]);
 
             } catch (\Throwable $e) {
-                  // Write the error into cache so the UI can surface it
+                  // Write the error into cache so the UI can surface it.
                   Cache::put("{$this->previewKey}:status", 'failed', now()->addMinutes(10));
                   Cache::put("{$this->previewKey}:error", $e->getMessage(), now()->addMinutes(10));
 
@@ -81,10 +86,15 @@ class TranslateFilePreviewJob implements ShouldQueue
                         'error' => $e->getMessage(),
                   ]);
 
+                  // Re-throw so Laravel can schedule the next retry attempt.
                   throw $e;
             }
       }
 
+      /**
+       * Progressive back-off: 30 s before retry 1, 60 s before retry 2.
+       * Matches $tries = 3 (1 initial attempt + 2 retries = 2 backoff values).
+       */
       public function backoff(): array
       {
             return [30, 60];

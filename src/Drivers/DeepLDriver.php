@@ -35,10 +35,13 @@ use Illuminate\Support\Facades\Log;
  *  max_retries    int     Retry attempts per chunk.                           (3)
  *  concurrency    int     Max parallel chunk requests.                        (3)
  *  cache_enabled  bool    Whether to use the Laravel cache.               (true)
- *  cache_ttl      int     Cache lifetime in seconds.                     (86400)
+ *  cache_ttl      int     Cache lifetime in seconds.                  (2592000)
  */
 class DeepLDriver extends AbstractTranslationDriver
 {
+      /** Correct log label — avoids ucfirst() producing "Deepl" instead of "DeepL". */
+      protected string $logName = 'DeepL';
+
       /** DeepL API key — injected via config / env. */
       protected string $apiKey;
 
@@ -57,38 +60,29 @@ class DeepLDriver extends AbstractTranslationDriver
 
       public function __construct()
       {
-            $this->apiKey = (string) config(
-                  'lara-glot.drivers.deepl.api_key',
-                  env('DEEPL_API_KEY', '')
-            );
+            $this->apiKey = (string) config('lara-glot.drivers.deepl.api_key', '');
 
             // Free-tier keys end with ':fx' and must hit the free subdomain.
             // Pro keys use the standard subdomain. Auto-detect unless overridden.
-            $this->baseUrl = (string) config(
-                  'lara-glot.drivers.deepl.base_url',
+            $configuredUrl = config('lara-glot.drivers.deepl.base_url');
+            $this->baseUrl = $configuredUrl ?: (
                   str_ends_with($this->apiKey, ':fx')
                   ? 'https://api-free.deepl.com/v2'
                   : 'https://api.deepl.com/v2'
             );
 
-            // Shared properties declared in AbstractTranslationDriver.
             $this->chunkSize = (int) config('lara-glot.drivers.deepl.chunk_size', 50);
             $this->maxRetries = (int) config('lara-glot.drivers.deepl.max_retries', 3);
             $this->retryDelayMs = (int) config('lara-glot.drivers.deepl.retry_delay_ms', 500);
             $this->concurrencyLimit = (int) config('lara-glot.drivers.deepl.concurrency', 3);
             $this->cacheEnabled = (bool) config('lara-glot.drivers.deepl.cache_enabled', true);
-            $this->cacheTtl = (int) config('lara-glot.drivers.deepl.cache_ttl', 2_592_000); // matches global LARAGLOT_CACHE_EXPIRY default
+            $this->cacheTtl = (int) config('lara-glot.drivers.deepl.cache_ttl', 2_592_000);
       }
 
       // ─────────────────────────────────────────────────────────────────────────
       // Driver identity
       // ─────────────────────────────────────────────────────────────────────────
 
-      /**
-       * Unique snake_case name for this driver.
-       * Used by the abstract class to build cache keys ("laraglot:deepl:...")
-       * and log tags ("[LaraGlot:Deepl] ...").
-       */
       protected function driverName(): string
       {
             return 'deepl';
@@ -108,12 +102,6 @@ class DeepLDriver extends AbstractTranslationDriver
        *  4. For each chunk result, write individual strings back to cache.
        *  5. Merge all results and restore the original key order.
        *
-       * WHY STRING-LEVEL CACHING (not chunk-level as in OllamaDriver)?
-       * DeepL is a cloud service billed per character. Caching at the string level
-       * means a single changed string in a batch does not invalidate the entire
-       * chunk. This is more cache-efficient for incremental translation workflows
-       * (e.g. adding one new key to a language file).
-       *
        * @param  array<int|string, string> $texts
        * @return array<int|string, string>
        */
@@ -123,23 +111,20 @@ class DeepLDriver extends AbstractTranslationDriver
             string $source = 'en'
       ): array {
             $results = [];
-            $pending = []; // strings that need an API call (cache-missed)
+            $pending = [];
 
             // ── Pass 1: Serve cache hits ──────────────────────────────────────────
             foreach ($texts as $key => $text) {
-                  // Preserve blank / non-string values without touching the API.
                   if (!is_string($text) || trim($text) === '') {
                         $results[$key] = $text;
                         continue;
                   }
 
-                  // getFromCache() increments hit/miss counters automatically.
                   $cached = $this->getFromCache($this->getCacheKey($text, $target, $source));
 
                   if ($cached !== null) {
                         $results[$key] = $cached;
                   } else {
-                        // Record for API translation in Pass 2.
                         $pending[$key] = $text;
                   }
             }
@@ -154,24 +139,17 @@ class DeepLDriver extends AbstractTranslationDriver
             $tasks = [];
 
             foreach ($chunks as $index => $chunk) {
-                  // Each task is a closure capturing its own chunk — no shared state.
                   $tasks[$index] = fn() => $this->translateChunk($chunk, $target, $source);
             }
 
             // ── Pass 3: Run all chunks concurrently ───────────────────────────────
-            // runConcurrentBatches() is inherited from AbstractTranslationDriver.
-            // $concurrencyLimit IS the batch size — each batch runs fully in parallel,
-            // and the next batch only starts once the current one completes.
             $batchResults = $this->runConcurrentBatches($tasks, $this->concurrencyLimit);
 
-            // ── Pass 4: Merge chunk outputs and write to cache ────────────────────
+            // ── Pass 4: Merge chunk outputs and write individual strings to cache ──
             foreach ($batchResults as $chunkOutput) {
-                  // $chunkOutput is an array of original-key → translated string.
                   foreach ($chunkOutput as $key => $translated) {
                         $results[$key] = $translated;
 
-                        // Write each individual string to cache so future single-string
-                        // or batch requests for the same text get an instant cache hit.
                         if (is_string($translated)) {
                               $this->putInCache(
                                     $this->getCacheKey($pending[$key], $target, $source),
@@ -193,13 +171,6 @@ class DeepLDriver extends AbstractTranslationDriver
       /**
        * Send one chunk to the DeepL API and return a key-preserving result map.
        *
-       * FLOW:
-       *  1. Normalise locale codes to DeepL's required format (EN → EN-US, etc.).
-       *  2. POST the array of values to /translate.
-       *  3. Validate the response length matches the input.
-       *  4. Re-map the translated values back onto the original keys.
-       *  5. On permanent failure, return the original strings (graceful fallback).
-       *
        * @param  array<int|string, string> $chunk
        * @return array<int|string, string>
        */
@@ -211,17 +182,25 @@ class DeepLDriver extends AbstractTranslationDriver
             $deepLTarget = $this->normalizeLocale($target);
             $deepLSource = $this->normalizeLocale($source);
 
-            // Separate keys from values — DeepL only receives the values array.
             $keys = array_keys($chunk);
             $values = array_values($chunk);
 
-            Log::info("{$this->logTag()} Sending chunk of " . count($chunk) . ' string(s) → ' . $deepLTarget);
+            // ── Protect placeholders BEFORE sending to DeepL ─────────────────────
+            // Builds $protectedValues (safe to send) and $placeholderMaps (for restore).
+            $protectedValues = [];
+            $placeholderMaps = [];
+
+            foreach ($values as $i => $text) {
+                  [$protectedValues[$i], $placeholderMaps[$i]] = $this->protectPlaceholders($text);
+            }
+
+            Log::info("{$this->logTag()} Sending chunk of " . count($chunk) . " string(s) → {$deepLTarget}");
 
             try {
+                  // $placeholderMaps is captured in use() so restore can happen inside.
                   return $this->withRetry(
-                        function () use ($keys, $values, $deepLTarget, $deepLSource): array {
+                        function () use ($keys, $protectedValues, $placeholderMaps, $deepLTarget, $deepLSource): array {
 
-                              // ── Outbound API call ─────────────────────────────────────
                               $this->recordApiCall();
 
                               $response = Http::withHeaders([
@@ -230,13 +209,11 @@ class DeepLDriver extends AbstractTranslationDriver
                               ])
                                     ->timeout(60)
                                     ->post("{$this->baseUrl}/translate", [
-                                          'text' => $values,
+                                          'text' => $protectedValues,
                                           'source_lang' => $deepLSource,
                                           'target_lang' => $deepLTarget,
-                                          // 'html' tells DeepL to preserve HTML tags inside strings.
                                           'tag_handling' => 'html',
-                                          // Split on punctuation and newlines for better sentence alignment.
-                                          'split_sentences' => '1',
+                                          'split_sentences' => 1,
                                           'preserve_formatting' => true,
                                     ]);
 
@@ -248,21 +225,25 @@ class DeepLDriver extends AbstractTranslationDriver
 
                               $translations = $response->json('translations', []);
 
-                              // ── Validate response length ──────────────────────────────
-                              if (!is_array($translations) || count($translations) !== count($values)) {
+                              if (!is_array($translations) || count($translations) !== count($protectedValues)) {
                                     throw new \RuntimeException(sprintf(
                                           'DeepL returned %d result(s) for %d input(s).',
                                           is_array($translations) ? count($translations) : 0,
-                                          count($values)
+                                          count($protectedValues)
                                     ));
                               }
 
-                              // ── Re-map onto original keys ─────────────────────────────
+                              // ── Re-map onto original keys + restore placeholders ──────
                               $mapped = [];
 
                               foreach ($keys as $i => $originalKey) {
-                                    $mapped[$originalKey] = $this->normalizeTranslated(
+                                    $normalized = $this->normalizeTranslated(
                                           $translations[$i]['text'] ?? ''
+                                    );
+                                    // Restore :name, URLs, <span translate="no"> etc.
+                                    $mapped[$originalKey] = $this->restorePlaceholders(
+                                          $normalized,
+                                          $placeholderMaps[$i]
                                     );
                               }
 
@@ -271,20 +252,28 @@ class DeepLDriver extends AbstractTranslationDriver
                               return $mapped;
                         },
                         $this->maxRetries,
-                        $this->retryDelayMs, // from config: lara-glot.drivers.deepl.retry_delay_ms
+                        $this->retryDelayMs,
                         ':DeepL'
                   );
 
             } catch (\Throwable $e) {
-                  // Permanent failure after all retries — return originals so the
-                  // caller always gets a usable array (never a thrown exception).
                   Log::error(
                         "{$this->logTag()} Chunk failed permanently after {$this->maxRetries} attempt(s).",
                         ['error' => $e->getMessage()]
                   );
 
-                  // Re-map original values onto their original keys.
-                  return array_combine($keys, $values);
+                  // Fallback: restore placeholders on original values so callers
+                  // always receive clean strings — never raw __VAR_0__ tokens.
+                  $fallback = [];
+
+                  foreach ($keys as $i => $originalKey) {
+                        $fallback[$originalKey] = $this->restorePlaceholders(
+                              $values[$i] ?? '',
+                              $placeholderMaps[$i]
+                        );
+                  }
+
+                  return $fallback;
             }
       }
 
@@ -302,8 +291,6 @@ class DeepLDriver extends AbstractTranslationDriver
        *  EN  → EN-US   (British English: EN-GB)
        *  PT  → PT-PT   (Brazilian Portuguese: PT-BR)
        *  ZH  → ZH-HANS (Traditional Chinese: ZH-HANT)
-       *
-       * All other codes are uppercased and passed through as-is.
        *
        * @see https://www.deepl.com/docs-api/translate-text/
        */

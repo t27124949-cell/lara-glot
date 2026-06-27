@@ -2,242 +2,166 @@
 
 namespace Tonydev\LaraGlot\Services;
 
-use Exception;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
-
+use Tonydev\LaraGlot\Services\TranslationService;
 class FileTranslationService
 {
       /**
-       * Translation service implementation.
+       * The translation service — provides in-process caching, force-refresh,
+       * and text normalisation on top of the raw driver.
        */
       protected TranslationService $translator;
 
-      /**
-       * Source locale configured in lara-glot.php.
-       */
+      /** Source locale configured in lara-glot.php. */
       protected string $sourceLocale;
 
-      /**
-       * Files excluded from translation scanning.
-       */
+      /** Files excluded from translation scanning. */
       protected array $excludedFiles;
 
       public function __construct(TranslationService $translator)
       {
             $this->translator = $translator;
-
-            // Centralized config loading
-            $this->sourceLocale = config(
-                  'lara-glot.source_locale',
-                  'en'
-            );
-
-            $this->excludedFiles = config(
-                  'lara-glot.exclude_files',
-                  []
-            );
+            $this->sourceLocale = config('lara-glot.source_locale', 'en');
+            $this->excludedFiles = config('lara-glot.exclude_files', []);
       }
 
+      // ─────────────────────────────────────────────────────────────────────────
+      // Public API
+      // ─────────────────────────────────────────────────────────────────────────
+
       /**
-       * Translate an entire language file.
+       * Translate an entire language file and write it to disk.
        *
-       * Used by:
-       * - CLI commands
-       * - Queue jobs
-       * - Automated sync workflows
-       *
-       * Example:
-       * auth → lang/fr/auth.php
+       * Used by CLI commands, queue jobs, and automated sync workflows.
+       * Example: 'auth' → lang/fr/auth.php
        */
-      public function translateFile(
-            string $fileName,
-            string $targetLocale
-      ): void {
-            $sourcePath = $this->getLanguageFilePath(
-                  $this->sourceLocale,
-                  $fileName
-            );
+      public function translateFile(string $fileName, string $targetLocale): void
+      {
+            $sourcePath = $this->getLanguageFilePath($this->sourceLocale, $fileName);
 
             if (!File::exists($sourcePath)) {
+                  Log::error('[LaraGlot] Source file not found.', ['path' => $sourcePath]);
 
-                  Log::error(
-                        '[LaraGlot] Source file not found.',
-                        ['path' => $sourcePath]
-                  );
-
-                  throw new Exception(
+                  throw new \RuntimeException(
                         "Source file [{$this->sourceLocale}/{$fileName}.php] not found."
                   );
             }
 
-            /**
-             * Use Laravel-safe require helper.
-             *
-             * This is safer than raw include and
-             * matches Laravel internals.
-             */
             $translations = File::getRequire($sourcePath);
 
             if (!is_array($translations)) {
                   return;
             }
 
-            /**
-             * Flatten nested translation arrays:
-             *
-             * [
-             *   'auth' => [
-             *      'failed' => '...'
-             *   ]
-             * ]
-             *
-             * becomes:
-             *
-             * auth.failed => ...
-             */
+            // Flatten nested array: ['auth' => ['failed' => '...']] → ['auth.failed' => '...']
             $flatArray = Arr::dot($translations);
 
-            $translatedFlat = $this->translateBatch(
-                  $flatArray,
-                  $targetLocale
-            );
+            $translatedFlat = $this->translateBatch($flatArray, $targetLocale);
 
-            /**
-             * Restore nested array structure.
-             */
+            // Restore nested structure from dot-notation keys.
             $translatedNested = [];
-
             foreach ($translatedFlat as $key => $value) {
                   Arr::set($translatedNested, $key, $value);
             }
 
-            $this->saveToFile(
-                  $fileName,
-                  $targetLocale,
-                  $translatedNested
-            );
+            $this->saveToFile($fileName, $targetLocale, $translatedNested);
       }
 
       /**
-       * Translate a flat translation array.
+       * Translate a flat dot-notation array and return translated values
+       * under the same keys.
        *
-       * Used by:
-       * - Preview system
-       * - Batch jobs
-       * - File translation
+       * NOTE: Placeholder protection (:name, URLs, <span translate="no">) is
+       * handled entirely by the driver via the ProtectsPlaceholders trait.
+       * This service passes raw values — no double-wrapping.
+       *
+       * Used by: preview system, batch jobs, file translation.
+       *
+       * @param  array<string, mixed> $flatArray  Dot-notation key → source string map.
+       * @param  string               $locale     Target locale code.
+       * @return array<string, mixed>             Same keys, translated values.
        */
-      public function translateBatch(
-            array $flatArray,
-            string $locale
-      ): array {
-            $keys = array_keys($flatArray);
+      public function translateBatch(array $flatArray, string $locale): array
+      {
+            if (empty($flatArray)) {
+                  return [];
+            }
 
-            /**
-             * Protect Laravel placeholders:
-             * :name
-             * :count
-             * etc.
-             */
-            $maskedValues = array_map(
-                  function ($text) {
-                        return is_string($text)
-                              ? $this->maskPlaceholders($text)
-                              : $text;
-                  },
-                  array_values($flatArray)
-            );
+            $ignoredKeys = config('lara-glot.ignored_keys', []);
+            $toTranslate = [];
+            $skipped = [];
 
-            /**
-             * Send translation batch to provider.
-             */
+            foreach ($flatArray as $key => $value) {
+                  $lastSegment = last(explode('.', (string) $key));
+                  if (in_array($lastSegment, $ignoredKeys, true)) {
+                        $skipped[$key] = $value;
+                  } else {
+                        $toTranslate[$key] = $value;
+                  }
+            }
+
+            if (empty($toTranslate)) {
+                  return $flatArray;
+            }
+
+            $keys = array_keys($toTranslate);
+            $values = array_values($toTranslate);
+
             $translatedValues = $this->translator->translateBatch(
-                  $maskedValues,
+                  $values,
                   $locale,
                   $this->sourceLocale
             );
 
-            /**
-             * Restore placeholders after translation.
-             */
-            $finalValues = array_map(
-                  fn($text) => is_string($text)
-                  ? $this->restorePlaceholders($text)
-                  : $text,
-                  $translatedValues
-            );
+            if (count($translatedValues) !== count($keys)) {
+                  throw new \RuntimeException(sprintf(
+                        'Driver returned %d value(s) for %d key(s).',
+                        count($translatedValues),
+                        count($keys)
+                  ));
+            }
 
-            return array_combine($keys, $finalValues);
+            $translated = array_combine($keys, $translatedValues);
+
+            $result = [];
+            foreach ($flatArray as $key => $value) {
+                  $result[$key] = $translated[$key] ?? $skipped[$key] ?? $value;
+            }
+
+            return $result;
       }
 
       /**
-       * Save translated language array to disk.
+       * Save a translated language array to disk.
        *
-       * Supports:
-       * - root files
-       * - nested directories
-       *
-       * Example:
-       * admin/users
+       * Supports root files and nested subdirectories.
+       * Example: 'admin/users' → lang/fr/admin/users.php
        */
-      public function saveToFile(
-            string $fileName,
-            string $locale,
-            array $data
-      ): void {
-            $path = $this->getLanguageFilePath(
-                  $locale,
-                  $fileName
-            );
-
+      public function saveToFile(string $fileName, string $locale, array $data): void
+      {
+            $path = $this->getLanguageFilePath($locale, $fileName);
             $directory = dirname($path);
 
-            /**
-             * Create nested directories automatically.
-             */
             if (!File::exists($directory)) {
-                  File::makeDirectory(
-                        $directory,
-                        0755,
-                        true
-                  );
+                  File::makeDirectory($directory, 0755, true);
             }
 
-            /**
-             * Convert PHP array to short syntax.
-             */
-            $export = var_export($data, true);
-
-            $export = preg_replace(
-                  '/^([ ]*)(.*)/m',
-                  '$1$1$2',
-                  $export
-            );
-
-            $array = str_replace(
-                  ['array (', ')'],
-                  ['[', ']'],
-                  $export
-            );
-
-            $content = "<?php\n\nreturn {$array};\n";
+            $content = "<?php\n\nreturn " . $this->arrayToPhpString($data) . ";\n";
 
             File::put($path, $content);
       }
 
       /**
-       * Get all translatable language files.
+       * Get all translatable language files as a flat key → label map.
        *
-       * Supports:
-       * - root files
-       * - nested files
-       * - recursive scanning
+       * Supports root files, nested files, and recursive scanning.
+       * Excludes files listed in lara-glot.exclude_files.
        *
-       * Examples:
-       * auth
-       * validation
-       * admin/users
+       * Examples: 'auth', 'validation', 'admin/users'
+       *
+       * @return array<string, string>
        */
       public function getTranslatableFiles(): array
       {
@@ -248,155 +172,76 @@ class FileTranslationService
             }
 
             return collect(File::allFiles($directory))
-
-                  /**
-                   * Only PHP language files.
-                   */
-                  ->filter(
-                        fn($file) => $file->getExtension() === 'php'
-                  )
-
-                  /**
-                   * Normalize paths.
-                   */
+                  ->filter(fn($file) => $file->getExtension() === 'php')
                   ->mapWithKeys(function ($file) use ($directory) {
-
                         $relative = str_replace(
-                              [
-                                    $directory . DIRECTORY_SEPARATOR,
-                                    '.php',
-                              ],
+                              [$directory . DIRECTORY_SEPARATOR, '.php'],
                               '',
                               $file->getPathname()
                         );
 
-                        /**
-                         * Windows/Linux compatibility.
-                         */
-                        $relative = str_replace(
-                              DIRECTORY_SEPARATOR,
-                              '/',
-                              $relative
-                        );
+                        // Normalize to forward slashes on all platforms.
+                        $relative = str_replace(DIRECTORY_SEPARATOR, '/', $relative);
 
-                        /**
-                         * Skip excluded files.
-                         */
-                        if (
-                              in_array(
-                                    $relative,
-                                    $this->excludedFiles,
-                                    true
-                              )
-                        ) {
+                        if (in_array($relative, $this->excludedFiles, true)) {
                               return [];
                         }
 
-                        return [
-                              $relative => $relative,
-                        ];
+                        return [$relative => $relative];
                   })
-
                   ->sortKeys()
-
                   ->toArray();
       }
 
+      // ─────────────────────────────────────────────────────────────────────────
+      // Helpers
+      // ─────────────────────────────────────────────────────────────────────────
+
       /**
-       * Generate a language file path.
+       * Build the full path for a language file.
        *
        * Examples:
-       * lang/en/auth.php
-       * lang/fr/admin/users.php
+       *   ('en', 'auth')         → {lang_path}/en/auth.php
+       *   ('fr', 'admin/users')  → {lang_path}/fr/admin/users.php
        */
-      protected function getLanguageFilePath(
-            string $locale,
-            string $fileName
-      ): string {
-            return lang_path(
-                  "{$locale}/{$fileName}.php"
-            );
+      protected function getLanguageFilePath(string $locale, string $fileName): string
+      {
+            return lang_path("{$locale}/{$fileName}.php");
       }
 
       /**
-       * Protect placeholders before translation.
+       * Convert a PHP array to a clean short-syntax string for writing to disk.
        *
-       * Prevents translation providers from modifying:
-       * :name
-       * :count
-       * etc.
+       * Produces properly indented output with short array syntax ([]).
+       * Unlike the var_export + regex approach, this never double-indents or
+       * corrupts strings that happen to start with spaces.
+       *
+       * @param  array<mixed, mixed> $array
+       * @param  int                 $depth  Current indentation depth (recursive).
+       * @return string                      PHP array literal, e.g. "[\n    'key' => 'value',\n]"
        */
-      protected function maskPlaceholders(
-            string $text
-      ): string {
+      protected function arrayToPhpString(array $array, int $depth = 0): string
+      {
+            $indent = str_repeat('    ', $depth);
+            $innerIndent = str_repeat('    ', $depth + 1);
+            $lines = ['['];
 
-            /**
-             * Handle Laravel pluralization strings.
-             *
-             * Example:
-             * one|many
-             */
-            if (str_contains($text, '|')) {
+            foreach ($array as $key => $value) {
+                  $exportedKey = is_string($key)
+                        ? "'" . addslashes($key) . "'"
+                        : $key;
 
-                  $parts = explode('|', $text);
+                  if (is_array($value)) {
+                        $exportedValue = $this->arrayToPhpString($value, $depth + 1);
+                  } else {
+                        $exportedValue = var_export($value, true);
+                  }
 
-                  return implode(
-                        '|',
-                        array_map(
-                              fn($part) => $this->maskPlaceholders(
-                                    trim($part)
-                              ),
-                              $parts
-                        )
-                  );
+                  $lines[] = "{$innerIndent}{$exportedKey} => {$exportedValue},";
             }
 
-            return preg_replace(
-                  '/:([a-zA-Z0-9_]+)/',
-                  '<span translate="no">:$1</span>',
-                  $text
-            );
-      }
+            $lines[] = "{$indent}]";
 
-      /**
-       * Restore placeholders after translation.
-       */
-      protected function restorePlaceholders(
-            string $translatedText
-      ): string {
-            $text = html_entity_decode(
-                  $translatedText,
-                  ENT_QUOTES,
-                  'UTF-8'
-            );
-
-            /**
-             * Remove injected protection tags.
-             */
-            $text = preg_replace(
-                  '/<span\b[^>]*>/i',
-                  '',
-                  $text
-            );
-
-            $text = str_ireplace(
-                  '</span>',
-                  '',
-                  $text
-            );
-
-            /**
-             * Fix spacing issues:
-             *
-             * "Hello :name !"
-             * → "Hello :name!"
-             */
-            $text = preg_replace(
-                  '/\s?(:[a-zA-Z0-9_]+)\s?/',
-                  ' $1',
-                  $text
-            );
-
-            return trim($text);
+            return implode("\n", $lines);
       }
 }

@@ -135,9 +135,9 @@ trait ProtectsPlaceholders
             //   /u               Unicode mode — \w covers non-ASCII word chars correctly.
             //
             $text = preg_replace_callback(
-                  '/(?<!\w):\w+/u',
+                  '/(?<![a-zA-Z0-9_]):[a-zA-Z0-9_]+/',
                   static function (array $m) use (&$placeholders, &$i): string {
-                        $key = "__VAR_{$i}__";
+                        $key = "__BRACE_{$i}__";
                         $placeholders[$key] = $m[0];
                         $i++;
                         return $key;
