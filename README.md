@@ -309,3 +309,4 @@ The rule everywhere: a failed translation returns the original string, never an 
 ## License
 
 MIT.
+Created by TONY THE DEVELOPER
