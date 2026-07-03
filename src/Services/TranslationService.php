@@ -2,9 +2,11 @@
 
 namespace Tonydev\LaraGlot\Services;
 
+use Closure;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Tonydev\LaraGlot\Contracts\TranslationDriverInterface;
+use Tonydev\LaraGlot\Drivers\AnthropicDriver;
 use Tonydev\LaraGlot\Drivers\DeepLDriver;
 use Tonydev\LaraGlot\Drivers\GoogleDriver;
 use Tonydev\LaraGlot\Drivers\OllamaDriver;
@@ -13,6 +15,15 @@ use Tonydev\LaraGlot\Drivers\OpenAiDriver;
 class TranslationService
 {
       protected TranslationDriverInterface $driver;
+
+      /**
+       * User-registered driver factories, keyed by driver name.
+       * Checked before the built-in map so apps can add or replace drivers
+       * without forking the package.
+       *
+       * @var array<string, Closure(): TranslationDriverInterface>
+       */
+      protected static array $customDrivers = [];
 
       /** In-process string → translation map; avoids redundant cache reads. */
       protected array $localCache = [];
@@ -30,23 +41,38 @@ class TranslationService
       // ─────────────────────────────────────────────────────────────────────────
 
       /**
-       * Resolve the configured driver through Laravel's service container so that
-       * consumers can rebind drivers in tests or extend them via the app container.
+       * Register a custom driver factory under a name usable in
+       * `lara-glot.translator`. Call from a service provider's boot():
+       *
+       *     TranslationService::extend('my-engine', fn () => new MyEngineDriver());
+       */
+      public static function extend(string $name, Closure $factory): void
+      {
+            static::$customDrivers[$name] = $factory;
+      }
+
+      /**
+       * Resolve the configured driver. Custom factories win over the built-in
+       * map; built-ins resolve through the container so tests can rebind them.
        */
       protected function resolveDriver(): TranslationDriverInterface
       {
+            $driverKey = (string) config('lara-glot.translator', 'google');
+
+            if (isset(static::$customDrivers[$driverKey])) {
+                  return (static::$customDrivers[$driverKey])();
+            }
+
             $map = [
+                  'anthropic' => AnthropicDriver::class,
                   'ollama' => OllamaDriver::class,
                   'openai' => OpenAiDriver::class,
                   'deepl' => DeepLDriver::class,
                   'google' => GoogleDriver::class,
             ];
 
-            $driverKey = (string) config('lara-glot.translator', 'google');
-            $driverClass = $map[$driverKey] ?? GoogleDriver::class;
-
             /** @var TranslationDriverInterface */
-            return app()->make($driverClass);
+            return app()->make($map[$driverKey] ?? GoogleDriver::class);
       }
 
       // ─────────────────────────────────────────────────────────────────────────
@@ -79,7 +105,7 @@ class TranslationService
                   return $text;
             }
 
-            // ✅ $source included in hash — prevents collision when source locale varies
+            // $source is part of the hash so differing source locales never collide
             $hash = $this->makeHash($target, $normalized, $source);
             $cacheKey = $this->makeCacheKey($hash);
 
@@ -164,7 +190,7 @@ class TranslationService
                         continue;
                   }
 
-                  // ✅ $source included in hash
+                  
                   $hash = $this->makeHash($target, $normalized, $source);
                   $cacheKey = $this->makeCacheKey($hash);
 
@@ -210,7 +236,7 @@ class TranslationService
             foreach ($needsTranslation as $key => $originalValue) {
                   $translatedValue = $translated[$key] ?? $originalValue;
 
-                  // ✅ $source included in hash
+                  
                   $hash = $this->makeHash($target, $originalValue, $source);
                   $cacheKey = $this->makeCacheKey($hash);
 
@@ -245,7 +271,7 @@ class TranslationService
       /**
        * Collision-resistant hash for a (source, target, text) triple.
        *
-       * ✅ $source is included so translating 'fr' → 'de' and 'en' → 'de'
+       * $source is included so translating 'fr' → 'de' and 'en' → 'de'
        * for the same text produce different hashes — no wrong cache hit.
        */
       protected function makeHash(string $target, string $text, string $source = 'en'): string

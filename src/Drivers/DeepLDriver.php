@@ -6,36 +6,16 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
- * DeepL REST API Translation Driver
+ * DeepL REST API driver.
+ *
+ * DeepL accepts up to 50 strings per request, so chunks are large and results
+ * are cached per string. Free-tier keys end with ':fx' and are routed to
+ * api-free.deepl.com automatically; override via `base_url` if needed.
+ *
+ * Config (lara-glot.drivers.deepl.*): api_key, base_url, chunk_size,
+ * max_retries, retry_delay_ms, concurrency, cache_enabled, cache_ttl.
  *
  * @see https://www.deepl.com/docs-api/translate-text/
- *
- * ──────────────────────────────────────────────────────────────────────────────
- * Overview
- * ──────────────────────────────────────────────────────────────────────────────
- *
- * Sends translation requests to the official DeepL REST API. DeepL natively
- * accepts an array of strings per request, so this driver:
- *  - Groups strings into chunks (default 50 — DeepL's limit is higher than LLMs).
- *  - Caches results at the individual string level so partial re-runs are fast.
- *  - Fans chunks out concurrently for maximum throughput.
- *  - Falls back to the original string on permanent failure (never throws to caller).
- *
- * Free vs Pro keys:
- *  Free-tier API keys end with ':fx' and must hit api-free.deepl.com.
- *  The constructor detects this automatically; you can override via config.
- *
- * ──────────────────────────────────────────────────────────────────────────────
- * Config keys  (lara-glot.drivers.deepl.*)
- * ──────────────────────────────────────────────────────────────────────────────
- *
- *  api_key        string  DeepL API key.                        (env DEEPL_API_KEY)
- *  base_url       string  API base URL (auto-detected from key).
- *  chunk_size     int     Strings per API call.                             (50)
- *  max_retries    int     Retry attempts per chunk.                           (3)
- *  concurrency    int     Max parallel chunk requests.                        (3)
- *  cache_enabled  bool    Whether to use the Laravel cache.               (true)
- *  cache_ttl      int     Cache lifetime in seconds.                  (2592000)
  */
 class DeepLDriver extends AbstractTranslationDriver
 {

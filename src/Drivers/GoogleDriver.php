@@ -7,36 +7,16 @@ use Stichoza\GoogleTranslate\GoogleTranslate;
 use Throwable;
 
 /**
- * Google Translate Driver (Unofficial — stichoza/google-translate-php)
+ * Google Translate driver (unofficial, via stichoza/google-translate-php).
  *
- * ──────────────────────────────────────────────────────────────────────────────
- * Overview
- * ──────────────────────────────────────────────────────────────────────────────
+ * The endpoint is undocumented and has no SLA, so this driver is built for
+ * graceful degradation: it never throws to the caller, adds optional jitter
+ * between requests to avoid rate limits, and uses a fresh client per call so
+ * concurrent tasks share no state. Good for development and low-volume work;
+ * use DeepL or an LLM driver for production traffic.
  *
- * Uses the unofficial Google Translate web endpoint via the stichoza package.
- * Because the endpoint is undocumented and has no SLA, this driver:
- *  - Gracefully falls back to the original string on any failure (never throws).
- *  - Adds optional per-request jitter to reduce the chance of rate-limiting.
- *  - Creates a new GoogleTranslate instance per request (stateless = concurrency safe).
- *
- * Recommended for:
- *  - Local development / prototyping
- *  - Low-volume production workloads
- *  - Artisan-driven translation file generation
- *
- * For mission-critical or high-volume production:
- *  → Use the DeepL or OpenAI driver instead.
- *
- * ──────────────────────────────────────────────────────────────────────────────
- * Config keys  (lara-glot.drivers.google.*)
- * ──────────────────────────────────────────────────────────────────────────────
- *
- *  max_retries      int   How many times to retry a failed request.       (3)
- *  retry_delay_ms   int   Base delay between retries in milliseconds.    (300)
- *  concurrency      int   Max parallel tasks per Concurrency batch.        (5)
- *  cache_enabled    bool  Whether to read/write the Laravel cache.       (true)
- *  cache_ttl        int   Cache lifetime in seconds.              (2592000)
- *  batch_delay_ms   int   Optional jitter added before each batch task.    (0)
+ * Config (lara-glot.drivers.google.*): max_retries, retry_delay_ms,
+ * concurrency, batch_delay_ms, cache_enabled, cache_ttl.
  */
 class GoogleDriver extends AbstractTranslationDriver
 {

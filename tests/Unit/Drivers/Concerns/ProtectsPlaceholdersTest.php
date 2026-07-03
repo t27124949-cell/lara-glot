@@ -79,3 +79,27 @@ it('handles empty string gracefully', function () use ($driver) {
       expect($protected)->toBe('');
       expect($map)->toBeEmpty();
 });
+
+it('protects glossary terms case-sensitively as whole words', function () use ($driver) {
+      config()->set('lara-glot.glossary.protected_terms', ['LaraGlot']);
+
+      [$protected, $map] = $driver->protect('Try LaraGlot — but laraglots or MyLaraGlot stay untouched.');
+
+      expect($protected)->toContain('__TERM_0__')
+            ->and($protected)->toContain('laraglots')
+            ->and($protected)->toContain('MyLaraGlot')
+            ->and($map['__TERM_0__'])->toBe('LaraGlot');
+
+      expect($driver->restore($protected, $map))
+            ->toBe('Try LaraGlot — but laraglots or MyLaraGlot stay untouched.');
+});
+
+it('leaves glossary terms inside urls to the url rule', function () use ($driver) {
+      config()->set('lara-glot.glossary.protected_terms', ['LaraGlot']);
+
+      [$protected, $map] = $driver->protect('Docs: https://laraglot.dev/LaraGlot/guide');
+
+      // The whole URL is one token; no __TERM_ token was created inside it.
+      expect(array_keys($map))->toHaveCount(1)
+            ->and($driver->restore($protected, $map))->toBe('Docs: https://laraglot.dev/LaraGlot/guide');
+});

@@ -1,6 +1,6 @@
 {
     "name": "tonydev/lara-glot",
-    "description": "Smart auto-translation for Laravel — models, language files, and Filament UI. Supports Google, DeepL, OpenAI, and Ollama.",
+    "description": "Auto-translation for Laravel models, language files, and Filament. Drivers for Anthropic Claude, OpenAI, DeepL, Google, and Ollama, with glossary locking and aggressive caching.",
     "type": "library",
     "license": "MIT",
     "keywords": [
@@ -10,6 +10,8 @@
         "localization",
         "deepl",
         "openai",
+        "anthropic",
+        "claude",
         "google-translate",
         "ollama",
         "filament"

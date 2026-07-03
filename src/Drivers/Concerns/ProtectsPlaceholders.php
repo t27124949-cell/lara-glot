@@ -123,7 +123,34 @@ trait ProtectsPlaceholders
                   $text
             );
 
-            // ── Pass 3: Laravel / generic :word placeholders ──────────────────────
+            // ── Pass 3: Glossary protected terms ──────────────────────────────────
+            //
+            // Brand and product names from lara-glot.glossary.protected_terms
+            // must stay byte-identical in every language. Matching is
+            // case-sensitive and whole-word (Unicode-aware boundaries), and
+            // runs after the URL pass so a term inside a URL is left to the
+            // URL rule.
+            //
+            foreach ((array) config('lara-glot.glossary.protected_terms', []) as $term) {
+                  if (!is_string($term) || trim($term) === '') {
+                        continue;
+                  }
+
+                  $pattern = '/(?<![\p{L}\p{N}_])' . preg_quote($term, '/') . '(?![\p{L}\p{N}_])/u';
+
+                  $text = preg_replace_callback(
+                        $pattern,
+                        static function (array $m) use (&$placeholders, &$i): string {
+                              $key = "__TERM_{$i}__";
+                              $placeholders[$key] = $m[0];
+                              $i++;
+                              return $key;
+                        },
+                        $text
+                  );
+            }
+
+            // ── Pass 4: Laravel / generic :word placeholders ──────────────────────
             //
             // Pattern breakdown:
             //   (?<!\w)          negative lookbehind — do NOT match if the character
