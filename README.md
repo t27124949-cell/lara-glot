@@ -22,6 +22,7 @@ Five drivers ship out of the box: Anthropic Claude, OpenAI, DeepL, Google Transl
 - [Custom Drivers](#custom-drivers)
 - [Custom Prompts](#custom-prompts)
 - [Failure Behaviour](#failure-behaviour)
+- [Upgrading to 2.1](#upgrading-to-21)
 - [Upgrading from 1.x](#upgrading-from-1x)
 - [License](#license)
 
@@ -229,7 +230,7 @@ Register it in `config/lara-glot.php`:
 ],
 ```
 
-Nested JSON content (page-builder sections, repeaters) is translated recursively. Keys listed in `ignored_keys` — identifiers, media paths, ordering fields — are passed through untouched. The published config ships with a minimal generic list (`id`, `uuid`, `slug`, `url`, `image`, `icon`, `color`, `sort_order`, `external_id`); add your own app-specific keys there.
+Nested JSON content (page-builder sections, repeaters) is translated recursively. Keys listed in `ignored_keys` — identifiers, security values, media paths, locale/format config, geo and ordering fields, timestamps — are passed through untouched. The published config ships with a comprehensive list of keys that are never human-readable labels (`id`, `uuid`, `slug`, `sku`, `token`, `avatar`, `latitude`, `created_at`, …); add your own app-specific keys there. Deliberately absent are words like `email` or `price` that are often translatable labels in language files.
 
 ## Language File Translation
 
@@ -344,12 +345,29 @@ The string replaces the built-in prompt entirely; `{source}` and `{target}` are 
 
 ## Failure Behaviour
 
-The rule everywhere: a failed translation returns the original string, never an exception and never a half-translated token soup.
+Two rules, depending on where you are:
 
-- Chunks retry with progressive back-off (3 attempts by default), then fall back to the originals.
-- Placeholders are restored even on the fallback path — callers never see `__VAR_0__`.
-- Review-pass failures keep the first draft.
-- Everything is logged under the `[LaraGlot:Driver]` tag, so failures are visible without being fatal.
+**At render time** (a page reading a translation), failure is graceful: a failed translation returns the original string, never an exception and never half-translated token soup. Placeholders are restored even on the fallback path — users never see `__VAR_0__`.
+
+**In jobs and commands**, failure is loud — a batch that writes English into `lang/ar/` while reporting success is corruption, not resilience:
+
+- Chunks retry with exponential back-off; transient failures (timeouts, 429s, 5xx) additionally retry in halved sub-chunks before any string falls back.
+- A batch driver error **throws** — the job fails visibly and retries, and nothing gets cached or written.
+- A file whose output is 100% identical to the source is treated as a failed run: not written, job failed.
+- Any individual string that does fall back is **recorded** in the retry table and re-attempted by `laraglot:retry` — a fallback is acceptable, a *silent* fallback is not.
+- Corrupt cache entries read as misses and are evicted automatically; forced refreshes (`--force`, `--repair`, retries) bypass every cache layer, including the driver's own.
+- Everything is logged under the `[LaraGlot:Driver]` tag.
+
+## Upgrading to 2.1
+
+2.1 fixes a data-corrupting bug and tightens failure behaviour. Read this if you ran 2.0 in production:
+
+- **Critical fix — multibyte corruption:** under Laravel's default `process` concurrency driver, translations to Arabic, Chinese, Hindi, and other multibyte scripts were silently replaced with the English source (`unserialize(): Error at offset …` in the log was the only trace). Fixed for both file and model translation. **Audit your existing locales** — `php artisan laraglot:audit` reports the damage and `--repair` heals only the affected values.
+- **Filament v4/v5 only:** the admin page uses the Schemas API and a non-static `$view`; Filament 3 panels are no longer supported.
+- **Run `php artisan migrate`:** creates the optional `lara_glot_translation_retries` table used by `laraglot:retry`.
+- **Behaviour change:** batch translation failures in jobs/commands now throw instead of silently writing source text; a 100% source-identical file fails the job instead of being written. Escape hatch: `LARAGLOT_FAIL_ON_FULL_FALLBACK=false`.
+- **`ignored_keys` defaults grew** substantially (identifiers, media paths, timestamps, …). If any of the new defaults collide with translatable label keys in your app, remove them in your published config.
+- **New config blocks** — `retry`, `audit` (threshold + allowlist), `fallback`, `protected_value_patterns`, per-driver `timeout`, `drivers.google.max_length` — all optional with sensible defaults; re-publish the config to pick them up.
 
 ## Upgrading from 1.x
 
