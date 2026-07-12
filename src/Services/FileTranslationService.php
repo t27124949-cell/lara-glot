@@ -5,14 +5,21 @@ namespace Tonydev\LaraGlot\Services;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
+use Tonydev\LaraGlot\Concerns\DeterminesTranslatability;
 use Tonydev\LaraGlot\Services\TranslationService;
+
 class FileTranslationService
 {
+      use DeterminesTranslatability;
+
       /**
        * The translation service — provides in-process caching, force-refresh,
        * and text normalisation on top of the raw driver.
        */
       protected TranslationService $translator;
+
+      /** Dead-letter state for values that fell back to source text. */
+      protected RetryQueue $retryQueue;
 
       /** Source locale configured in lara-glot.php. */
       protected string $sourceLocale;
@@ -20,9 +27,10 @@ class FileTranslationService
       /** Files excluded from translation scanning. */
       protected array $excludedFiles;
 
-      public function __construct(TranslationService $translator)
+      public function __construct(TranslationService $translator, ?RetryQueue $retryQueue = null)
       {
             $this->translator = $translator;
+            $this->retryQueue = $retryQueue ?? new RetryQueue();
             $this->sourceLocale = config('lara-glot.source_locale', 'en');
             $this->excludedFiles = config('lara-glot.exclude_files', []);
       }
@@ -36,8 +44,17 @@ class FileTranslationService
        *
        * Used by CLI commands, queue jobs, and automated sync workflows.
        * Example: 'auth' → lang/fr/auth.php
+       *
+       * Returns per-file fallback statistics so callers can surface how many
+       * strings actually translated versus silently fell back to source:
+       * ['total' => int, 'identical' => int, 'translated' => int, 'ratio' => float]
+       *
+       * When EVERY translatable string comes back byte-identical to the source
+       * (the signature of a failed run, not a real translation), the file is
+       * NOT written and a RuntimeException is thrown — unless
+       * `lara-glot.fallback.fail_on_full_fallback` is disabled.
        */
-      public function translateFile(string $fileName, string $targetLocale): void
+      public function translateFile(string $fileName, string $targetLocale): array
       {
             $sourcePath = $this->getLanguageFilePath($this->sourceLocale, $fileName);
 
@@ -52,13 +69,43 @@ class FileTranslationService
             $translations = File::getRequire($sourcePath);
 
             if (!is_array($translations)) {
-                  return;
+                  return ['total' => 0, 'identical' => 0, 'translated' => 0, 'ratio' => 0.0];
             }
 
             // Flatten nested array: ['auth' => ['failed' => '...']] → ['auth.failed' => '...']
             $flatArray = Arr::dot($translations);
 
             $translatedFlat = $this->translateBatch($flatArray, $targetLocale);
+
+            $stats = $this->fallbackStats($flatArray, $translatedFlat);
+
+            if (
+                  $stats['total'] > 0
+                  && $stats['identical'] === $stats['total']
+                  && config('lara-glot.fallback.fail_on_full_fallback', true)
+            ) {
+                  throw new \RuntimeException(sprintf(
+                        'All %d string(s) in [%s → %s] came back identical to the source — '
+                              . 'treating as a failed translation run, file not written. '
+                              . 'Check the log for driver errors, or disable '
+                              . 'lara-glot.fallback.fail_on_full_fallback if this locale is '
+                              . 'legitimately identical.',
+                        $stats['total'],
+                        $fileName,
+                        $targetLocale
+                  ));
+            }
+
+            $warnRatio = (float) config('lara-glot.fallback.warn_ratio', 0.5);
+
+            if ($stats['total'] > 0 && $stats['ratio'] >= $warnRatio) {
+                  Log::warning('[LaraGlot] High source-fallback ratio for file.', [
+                        'file' => $fileName,
+                        'locale' => $targetLocale,
+                        'identical' => $stats['identical'],
+                        'total' => $stats['total'],
+                  ]);
+            }
 
             // Restore nested structure from dot-notation keys.
             $translatedNested = [];
@@ -67,6 +114,20 @@ class FileTranslationService
             }
 
             $this->saveToFile($fileName, $targetLocale, $translatedNested);
+
+            // Never silently fall back: record every value that stayed
+            // identical to the source so laraglot:retry can re-attempt it on
+            // a schedule instead of it hiding in a written file forever.
+            foreach ($flatArray as $key => $value) {
+                  if (
+                        $this->isAuditable($key, $value)
+                        && ($translatedFlat[$key] ?? $value) === $value
+                  ) {
+                        $this->retryQueue->record('file', $fileName, (string) $key, $targetLocale, $value);
+                  }
+            }
+
+            return $stats;
       }
 
       /**
@@ -89,13 +150,11 @@ class FileTranslationService
                   return [];
             }
 
-            $ignoredKeys = config('lara-glot.ignored_keys', []);
             $toTranslate = [];
             $skipped = [];
 
             foreach ($flatArray as $key => $value) {
-                  $lastSegment = last(explode('.', (string) $key));
-                  if (in_array($lastSegment, $ignoredKeys, true)) {
+                  if ($this->isIgnoredKey($key) || $this->isProtectedValue($value)) {
                         $skipped[$key] = $value;
                   } else {
                         $toTranslate[$key] = $value;
@@ -196,6 +255,42 @@ class FileTranslationService
       // ─────────────────────────────────────────────────────────────────────────
       // Helpers
       // ─────────────────────────────────────────────────────────────────────────
+
+      /**
+       * Count how many translatable strings came back byte-identical to their
+       * source — the observable signature of a silent fallback. Keys that were
+       * never eligible for translation (ignored keys, protected values,
+       * non-strings, blanks, audit-allowlisted values) are excluded so they
+       * can't skew the ratio or trip the full-fallback failure.
+       *
+       * @param  array<string, mixed> $source
+       * @param  array<string, mixed> $translated
+       * @return array{total: int, identical: int, translated: int, ratio: float}
+       */
+      protected function fallbackStats(array $source, array $translated): array
+      {
+            $total = 0;
+            $identical = 0;
+
+            foreach ($source as $key => $value) {
+                  if (!$this->isAuditable($key, $value)) {
+                        continue;
+                  }
+
+                  $total++;
+
+                  if (($translated[$key] ?? $value) === $value) {
+                        $identical++;
+                  }
+            }
+
+            return [
+                  'total' => $total,
+                  'identical' => $identical,
+                  'translated' => $total - $identical,
+                  'ratio' => $total > 0 ? round($identical / $total, 4) : 0.0,
+            ];
+      }
 
       /**
        * Build the full path for a language file.

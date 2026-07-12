@@ -71,6 +71,40 @@ it('sends identical strings to the API only once', function () {
       });
 });
 
+it('retries a transiently failing chunk in smaller sub-chunks before falling back', function () {
+      // Requests carrying more than one string time out / overload; single-string
+      // requests succeed. The driver must split instead of dropping the chunk.
+      Http::fake(function ($request) {
+            $input = json_decode($request['messages'][0]['content'], true);
+
+            if (count($input) > 1) {
+                  return Http::response(['error' => 'overloaded'], 529);
+            }
+
+            return Http::response(anthropicResponse(['T-' . $input[0]]));
+      });
+
+      $driver = new AnthropicDriver();
+      $result = $driver->translateBatch(['a' => 'Hello', 'b' => 'World'], 'fr');
+
+      expect($result)->toBe(['a' => 'T-Hello', 'b' => 'T-World']);
+});
+
+it('does not sub-chunk on terminal errors like invalid credentials', function () {
+      Http::fake([
+            'api.anthropic.com/v1/messages' => Http::response(['error' => 'invalid x-api-key'], 401),
+      ]);
+
+      $driver = new AnthropicDriver();
+      $result = $driver->translateBatch(['a' => 'Hello', 'b' => 'World'], 'fr');
+
+      // Falls back to source without multiplying doomed API calls:
+      // 1 attempt × max_retries (1) — no per-string retries.
+      expect($result)->toBe(['a' => 'Hello', 'b' => 'World']);
+
+      Http::assertSentCount(1);
+});
+
 it('falls back to original strings when the API fails permanently', function () {
       Http::fake([
             'api.anthropic.com/v1/messages' => Http::response(['error' => 'overloaded'], 529),

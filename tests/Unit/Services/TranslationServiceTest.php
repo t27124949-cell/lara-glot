@@ -140,14 +140,107 @@ it('preserves original key order in batch output', function () {
       expect(array_keys($result))->toBe(['a', 'b', 'c']);
 });
 
-it('falls back to originals when batch driver throws', function () {
+it('throws when the batch driver fails instead of silently falling back to source', function () {
       $this->driver
             ->shouldReceive('translateBatch')
             ->andThrow(new \RuntimeException('API error'));
 
-      $result = $this->service->translateBatch(['Hello', 'World'], 'fr');
+      // Batch callers are queue jobs / console commands — a driver failure must
+      // fail the job, not write source text that then masquerades as done.
+      expect(fn() => $this->service->translateBatch(['Hello', 'World'], 'fr'))
+            ->toThrow(\RuntimeException::class);
+});
 
-      expect($result)->toBe([0 => 'Hello', 1 => 'World']);
+it('does not cache source text when the batch driver fails', function () {
+      $this->driver
+            ->shouldReceive('translateBatch')
+            ->once()
+            ->andThrow(new \RuntimeException('API error'));
+
+      try {
+            $this->service->translateBatch(['Hello'], 'fr');
+      } catch (\RuntimeException) {
+            // expected
+      }
+
+      // A fresh service with a working driver must reach the driver — if the
+      // failed run had cached 'Hello' as the fr translation, this would be a
+      // (poisoned) cache hit returning English.
+      $workingDriver = Mockery::mock(TranslationDriverInterface::class);
+      $workingDriver
+            ->shouldReceive('translateBatch')
+            ->once()
+            ->andReturn([0 => 'Bonjour']);
+
+      $service = new class ($workingDriver) extends TranslationService {
+            public function __construct(protected TranslationDriverInterface $mockDriver)
+            {
+                  $this->driver = $mockDriver;
+            }
+      };
+
+      expect($service->translateBatch(['Hello'], 'fr'))->toBe([0 => 'Bonjour']);
+});
+
+it('treats a corrupt cache entry as a miss during batch translation', function () {
+      Cache::shouldReceive('get')
+            ->once()
+            ->andThrow(new \ErrorException('unserialize(): Error at offset 955 of 1143 bytes'));
+      Cache::shouldReceive('forget')->once();
+      Cache::shouldReceive('put');
+
+      $this->driver
+            ->shouldReceive('translateBatch')
+            ->once()
+            ->andReturn([0 => 'Bonjour']);
+
+      expect($this->service->translateBatch(['Hello'], 'fr'))->toBe([0 => 'Bonjour']);
+});
+
+it('bypasses the driver-level cache when forcing a batch refresh', function () {
+      // A driver with its own string-level cache holding a stale (poisoned)
+      // value. force=true must reach the API, not the driver's cache.
+      $driver = new class implements TranslationDriverInterface {
+            public bool $cacheEnabled = true;
+
+            public function setCacheEnabled(bool $enabled): static
+            {
+                  $this->cacheEnabled = $enabled;
+
+                  return $this;
+            }
+
+            public function isCacheEnabled(): bool
+            {
+                  return $this->cacheEnabled;
+            }
+
+            public function translate(string $text, string $target, string $source = 'en'): string
+            {
+                  return $this->cacheEnabled ? $text /* stale cached English */ : 'Bonjour';
+            }
+
+            public function translateBatch(array $texts, string $target, string $source = 'en'): array
+            {
+                  return array_map(fn($t) => $this->translate($t, $target, $source), $texts);
+            }
+      };
+
+      $service = new class ($driver) extends TranslationService {
+            public function __construct(protected TranslationDriverInterface $mockDriver)
+            {
+                  $this->driver = $mockDriver;
+            }
+      };
+
+      // Without force: driver cache wins (the pre-fix behavior).
+      expect($service->translateBatch(['Hello'], 'fr'))->toBe([0 => 'Hello']);
+
+      // With force: punches through BOTH cache layers…
+      expect($service->translateBatch(['Hello'], 'fr', 'en', force: true))->toBe([0 => 'Bonjour']);
+
+      // …and restores the driver's previous cache setting afterwards.
+      expect($driver->cacheEnabled)->toBeTrue();
 });
 
 // ── Cache key includes source locale ─────────────────────────────────────────

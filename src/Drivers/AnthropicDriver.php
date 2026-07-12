@@ -29,8 +29,12 @@ class AnthropicDriver extends AbstractLlmDriver
       /** Required by the Messages API — caps output length per chunk call. */
       protected int $maxTokens;
 
+      /** Per-request HTTP timeout in seconds. */
+      protected int $timeout;
+
       public function __construct()
       {
+            $this->timeout = (int) config('lara-glot.drivers.anthropic.timeout', 120);
             $this->apiKey = (string) config('lara-glot.drivers.anthropic.api_key', '');
             $this->model = (string) config('lara-glot.drivers.anthropic.model', 'claude-haiku-4-5');
             $this->baseUrl = rtrim(
@@ -57,7 +61,7 @@ class AnthropicDriver extends AbstractLlmDriver
                   'x-api-key' => $this->apiKey,
                   'anthropic-version' => '2023-06-01',
             ])
-                  ->timeout(120)
+                  ->timeout($this->timeout)
                   ->post("{$this->baseUrl}/v1/messages", [
                         'model' => $this->model,
                         'max_tokens' => $this->maxTokens,

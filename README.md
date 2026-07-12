@@ -32,7 +32,7 @@ Five drivers ship out of the box: Anthropic Claude, OpenAI, DeepL, Google Transl
 | PHP | `^8.3` |
 | Laravel | `^11.0 \| ^12.0 \| ^13.0` |
 | spatie/laravel-translatable | `^6.0` (for model translation) |
-| filament/filament | `^3.0` (for the admin UI) |
+| filament/filament | `^4.0 \| ^5.0` (for the admin UI) |
 
 ## Installation
 
@@ -63,6 +63,8 @@ php artisan queue:batches-table
 php artisan migrate
 ```
 
+Running `php artisan migrate` also creates the `lara_glot_translation_retries` table, which tracks values that fell back to source text so `laraglot:retry` can re-attempt them. It's optional — without it, translation still works and LaraGlot logs a single notice instead of tracking fallbacks.
+
 ## Configuration
 
 Pick a driver and set its key in `.env`:
@@ -80,7 +82,27 @@ LARAGLOT_DRIVER=deepl
 DEEPL_API_KEY=...
 ```
 
-Every driver accepts the same tuning knobs in `config/lara-glot.php`: chunk size, retries, retry delay, concurrency, and cache TTL. The defaults are sensible; you rarely need to touch them.
+Every driver accepts the same tuning knobs in `config/lara-glot.php`: chunk size, retries, retry delay, concurrency, HTTP timeout, and cache TTL. The defaults are sensible; you rarely need to touch them.
+
+For slow reasoning models (e.g. DeepSeek-class models behind an OpenAI-compatible endpoint), raise the timeout and/or lower the chunk size:
+
+```env
+LARAGLOT_OPENAI_TIMEOUT=180
+LARAGLOT_OPENAI_CHUNK_SIZE=10
+```
+
+When a chunk still times out (or gets rate-limited), the LLM drivers automatically retry it in smaller sub-chunks before falling back, so one slow request no longer drops a whole chunk of strings to source text.
+
+### Fallback detection
+
+When a driver fails on a string, that string falls back to the source text. LaraGlot refuses to let that go unnoticed:
+
+- `laraglot:files --sync` prints a per-file `translated / identical-to-source` count, warns when the fallback share exceeds `lara-glot.fallback.warn_ratio` (default `0.5`), and exits non-zero on failures.
+- When *every* translatable string in a file comes back identical to the source — the signature of a failed run — the file is **not written** and the job fails so it can retry, instead of an untranslated English file masquerading as done. Disable via `LARAGLOT_FAIL_ON_FULL_FALLBACK=false` if a locale is legitimately identical to the source.
+
+### Protected values
+
+Values that are references rather than prose — `'link' => 'route:contact'`, bare URLs, `mailto:`/`tel:` links — are passed through untranslated. Patterns are configurable in `lara-glot.protected_value_patterns`.
 
 ## Drivers
 
@@ -89,7 +111,7 @@ Every driver accepts the same tuning knobs in `config/lara-glot.php`: chunk size
 | `anthropic` | yes | Best translation quality. Defaults to `claude-haiku-4-5` (fast, cheap); set `claude-sonnet-5` when nuance matters most. |
 | `openai` | yes | Works with any OpenAI-compatible endpoint — OpenAI, Azure, Groq, Together AI. Defaults to `gpt-5-mini`. |
 | `deepl` | yes | Strong European-language quality at a flat per-character price. Free-tier keys (ending `:fx`) are detected automatically. |
-| `google` | no | Prototyping and low-volume work. Uses the unofficial web endpoint — no SLA, so don't build production on it. |
+| `google` | no | Prototyping and low-volume work. Uses the unofficial web endpoint — no SLA, so don't build production on it. Long strings are split on sentence boundaries automatically (`LARAGLOT_GOOGLE_MAX_LENGTH`, default 1500 chars) since the free endpoint 500s on long payloads, and every response is verified to have preserved placeholder tokens before being accepted. |
 | `ollama` | no | Fully local and free. Point it at any model your hardware can run. Defaults to `llama3.2`. |
 
 To use another OpenAI-compatible provider, change the base URL — no code changes:
@@ -242,6 +264,36 @@ php artisan laraglot:sync --force                  # ignore change detection
 ### `laraglot:files`
 
 Translates PHP language files. See the section above for options (`file?`, `--locale=`, `--force`, `--sync`).
+
+### `laraglot:audit`
+
+Reports every language-file key and model attribute whose value is byte-identical to the source locale — the signature of a silent translation fallback — and can repair them in place:
+
+```bash
+php artisan laraglot:audit                        # audit all files + registered models
+php artisan laraglot:audit --locale=ar --locale=de
+php artisan laraglot:audit --files-only --file=footer
+php artisan laraglot:audit --models-only "--model=App\Models\Faq"
+php artisan laraglot:audit --repair               # re-translate ONLY the identical values
+php artisan laraglot:audit --threshold=0.5        # flag at ≥50% identical (default 0.85)
+```
+
+- Exits non-zero when any file/model locale is flagged at or above the threshold, so it works as a CI gate or scheduled canary (`Schedule::command('laraglot:audit')`).
+- `--repair` re-translates only the values still equal to the source (missing keys included) with a forced cache refresh, so fixing fallbacks never re-bills the whole corpus and evicts poisoned cache entries.
+- Values that are *supposed* to be identical across locales belong in `lara-glot.audit.allowlist` — they're never flagged or re-billed. The default list ships with common acronyms, units, and platform names ("OK", "SMS", "PDF", "iOS", "PayPal", …); extend it in the published config. `ignored_keys` and `protected_value_patterns` are excluded automatically.
+
+### `laraglot:retry`
+
+Whenever a value falls back to source text during a translation run, LaraGlot records it in the `lara_glot_translation_retries` table — a fallback is never silent. This command re-attempts those units:
+
+```bash
+php artisan laraglot:retry               # process everything currently due
+php artisan laraglot:retry --limit=100
+```
+
+- **Bounded, with back-off:** each failed attempt reschedules the unit at `base_delay_minutes × 2^attempts` (default 30 min base); after `max_attempts` (default 5) the unit is parked as *exhausted* and the command exits non-zero so it surfaces for human review instead of re-billing forever. Tune via `lara-glot.retry`.
+- **Never wastes an API call:** units whose source text changed, whose key was removed, or that were already healed elsewhere (an audit `--repair`, a `--force` run, a manual edit) are resolved without touching the driver.
+- **Idempotent + resumable:** run it on a schedule (`Schedule::command('laraglot:retry')->hourly()`) and coverage converges; exhausted strings that are legitimately identical belong in `lara-glot.audit.allowlist`.
 
 ## Queue Setup
 

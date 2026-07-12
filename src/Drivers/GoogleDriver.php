@@ -27,6 +27,13 @@ class GoogleDriver extends AbstractTranslationDriver
        */
       protected int $batchDelayMs;
 
+      /**
+       * Maximum characters per request. The free endpoint 500s intermittently
+       * on long multi-sentence GET payloads; strings above this length are
+       * split on sentence boundaries, translated part by part, and rejoined.
+       */
+      protected int $maxLength;
+
       // ─────────────────────────────────────────────────────────────────────────
       // Bootstrap
       // ─────────────────────────────────────────────────────────────────────────
@@ -39,6 +46,7 @@ class GoogleDriver extends AbstractTranslationDriver
             $this->cacheEnabled = (bool) config('lara-glot.drivers.google.cache_enabled', true);
             $this->cacheTtl = (int) config('lara-glot.drivers.google.cache_ttl', 2_592_000);
             $this->batchDelayMs = (int) config('lara-glot.drivers.google.batch_delay_ms', 0);
+            $this->maxLength = max(200, (int) config('lara-glot.drivers.google.max_length', 1500));
       }
 
       // ─────────────────────────────────────────────────────────────────────────
@@ -67,11 +75,15 @@ class GoogleDriver extends AbstractTranslationDriver
        *  1. Return empty string immediately for blank input.
        *  2. Check the cache — return the cached value if present.
        *  3. Protect placeholders (`:name`, URLs, no-translate spans).
-       *  4. Call the unofficial Google endpoint with retry/back-off.
-       *     recordApiCall() is inside the closure so retries are counted accurately.
+       *  4. Call the unofficial Google endpoint with retry/back-off. Strings
+       *     longer than max_length are split on sentence boundaries and
+       *     translated part by part — the free endpoint 500s on long GETs.
+       *     Each attempt verifies the opaque tokens survived the round-trip;
+       *     a mangled token counts as a failed attempt and is retried.
        *  5. Restore placeholders + normalize whitespace/entities.
        *  6. Write to cache, return to caller.
-       *  7. On any failure: log the error and return the original string (graceful fallback).
+       *  7. On any failure: log the error and return the original string
+       *     (graceful fallback — this driver never throws to the caller).
        */
       public function translate(
             string $text,
@@ -95,34 +107,18 @@ class GoogleDriver extends AbstractTranslationDriver
             [$protected, $placeholders] = $this->protectPlaceholders($text);
 
             try {
-                  // ── API call with retry ───────────────────────────────────────────
-                  // recordApiCall() is INSIDE the closure so every HTTP attempt —
-                  // including retries — increments the counter accurately.
-                  $translated = $this->withRetry(
-                        function () use ($protected, $source, $target): string {
-                              // Count every actual outbound HTTP attempt, not just the first.
-                              $this->recordApiCall();
+                  // ── API call(s) — long strings go sentence-by-sentence ────────────
+                  if (mb_strlen($protected) > $this->maxLength) {
+                        $parts = [];
 
-                              // New instance per call = no shared state between concurrent tasks.
-                              $client = new GoogleTranslate();
+                        foreach ($this->splitLongText($protected, $this->maxLength) as $segment) {
+                              $parts[] = $this->callGoogle($segment, $target, $source, $placeholders);
+                        }
 
-                              $result = $client
-                                    ->setSource($source)
-                                    ->setTarget($target)
-                                    ->translate($protected);
-
-                              if (!is_string($result) || trim($result) === '') {
-                                    throw new \RuntimeException(
-                                          'Google Translate returned an empty result.'
-                                    );
-                              }
-
-                              return $result;
-                        },
-                        $this->maxRetries,
-                        $this->retryDelayMs,
-                        ':Google'
-                  );
+                        $translated = implode(' ', $parts);
+                  } else {
+                        $translated = $this->callGoogle($protected, $target, $source, $placeholders);
+                  }
 
                   // ── Post-processing ───────────────────────────────────────────────
                   $final = $this->restorePlaceholders(
@@ -145,6 +141,141 @@ class GoogleDriver extends AbstractTranslationDriver
 
                   return $text;
             }
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // Single API round-trip with retry + token verification
+      // ─────────────────────────────────────────────────────────────────────────
+
+      /**
+       * One retried call to the unofficial endpoint. Verifies that every
+       * placeholder token present in THIS piece of text survived the
+       * round-trip byte-identical — the engine sometimes translates or
+       * re-cases tokens like __BRACE_0__, which would leak raw tokens into
+       * the final string. A mangled token is treated as a failed attempt.
+       *
+       * @param  array<string,string> $placeholders  Full map for the original string;
+       *                                             filtered to the tokens in $text.
+       */
+      protected function callGoogle(
+            string $text,
+            string $target,
+            string $source,
+            array $placeholders
+      ): string {
+            // Long strings are split into segments, each carrying only a
+            // subset of the tokens — verify just the ones actually sent.
+            $expected = array_filter(
+                  $placeholders,
+                  static fn($original, $key) => str_contains($text, $key),
+                  ARRAY_FILTER_USE_BOTH
+            );
+
+            // recordApiCall() is INSIDE the closure so every HTTP attempt —
+            // including retries — increments the counter accurately.
+            return $this->withRetry(
+                  function () use ($text, $source, $target, $expected): string {
+                        // Count every actual outbound HTTP attempt, not just the first.
+                        $this->recordApiCall();
+
+                        // New instance per call = no shared state between concurrent tasks.
+                        $client = new GoogleTranslate();
+
+                        $result = $client
+                              ->setSource($source)
+                              ->setTarget($target)
+                              ->translate($text);
+
+                        if (!is_string($result) || trim($result) === '') {
+                              throw new \RuntimeException(
+                                    'Google Translate returned an empty result.'
+                              );
+                        }
+
+                        if (!$this->placeholdersSurvived($result, $expected)) {
+                              throw new \RuntimeException(
+                                    'Google Translate mangled a placeholder token.'
+                              );
+                        }
+
+                        return $result;
+                  },
+                  $this->maxRetries,
+                  $this->retryDelayMs,
+                  ':Google'
+            );
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // Long-string splitting
+      // ─────────────────────────────────────────────────────────────────────────
+
+      /**
+       * Split a long string into segments of at most $maxLength characters,
+       * cutting on sentence boundaries where possible and falling back to
+       * word boundaries for a single overlong sentence. Placeholder tokens
+       * contain no whitespace, so they are never cut in half.
+       *
+       * @return list<string>
+       */
+      protected function splitLongText(string $text, int $maxLength): array
+      {
+            $sentences = preg_split(
+                  '/(?<=[.!?…。！？؟])\s+/u',
+                  $text,
+                  -1,
+                  PREG_SPLIT_NO_EMPTY
+            ) ?: [$text];
+
+            // Break any single sentence that still exceeds the cap on words.
+            $pieces = [];
+
+            foreach ($sentences as $sentence) {
+                  if (mb_strlen($sentence) <= $maxLength) {
+                        $pieces[] = $sentence;
+                        continue;
+                  }
+
+                  $words = preg_split('/\s+/u', $sentence, -1, PREG_SPLIT_NO_EMPTY) ?: [$sentence];
+                  $current = '';
+
+                  foreach ($words as $word) {
+                        $candidate = $current === '' ? $word : "{$current} {$word}";
+
+                        if (mb_strlen($candidate) > $maxLength && $current !== '') {
+                              $pieces[] = $current;
+                              $current = $word;
+                        } else {
+                              $current = $candidate;
+                        }
+                  }
+
+                  if ($current !== '') {
+                        $pieces[] = $current;
+                  }
+            }
+
+            // Greedily pack pieces back together up to the cap so we make as
+            // few requests as possible.
+            $segments = [];
+            $current = '';
+
+            foreach ($pieces as $piece) {
+                  $candidate = $current === '' ? $piece : "{$current} {$piece}";
+
+                  if (mb_strlen($candidate) > $maxLength && $current !== '') {
+                        $segments[] = $current;
+                        $current = $piece;
+                  } else {
+                        $current = $candidate;
+                  }
+            }
+
+            if ($current !== '') {
+                  $segments[] = $current;
+            }
+
+            return $segments;
       }
 
       // ─────────────────────────────────────────────────────────────────────────

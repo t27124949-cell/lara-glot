@@ -34,6 +34,9 @@ class DeepLDriver extends AbstractTranslationDriver
        */
       protected int $chunkSize;
 
+      /** Per-request HTTP timeout in seconds. */
+      protected int $timeout;
+
       // ─────────────────────────────────────────────────────────────────────────
       // Bootstrap
       // ─────────────────────────────────────────────────────────────────────────
@@ -51,6 +54,7 @@ class DeepLDriver extends AbstractTranslationDriver
                   : 'https://api.deepl.com/v2'
             );
 
+            $this->timeout = (int) config('lara-glot.drivers.deepl.timeout', 60);
             $this->chunkSize = (int) config('lara-glot.drivers.deepl.chunk_size', 50);
             $this->maxRetries = (int) config('lara-glot.drivers.deepl.max_retries', 3);
             $this->retryDelayMs = (int) config('lara-glot.drivers.deepl.retry_delay_ms', 500);
@@ -187,7 +191,7 @@ class DeepLDriver extends AbstractTranslationDriver
                                     'Authorization' => 'DeepL-Auth-Key ' . $this->apiKey,
                                     'Content-Type' => 'application/json',
                               ])
-                                    ->timeout(60)
+                                    ->timeout($this->timeout)
                                     ->post("{$this->baseUrl}/translate", [
                                           'text' => $protectedValues,
                                           'source_lang' => $deepLSource,

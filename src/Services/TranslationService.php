@@ -124,14 +124,17 @@ class TranslationService
                   $result = Cache::remember(
                         $cacheKey,
                         $this->cacheTtl(),
-                        function () use ($normalized, $target, $source): string {
+                        function () use ($normalized, $target, $source, $force): string {
                               Log::info('[LaraGlot] Translating string.', [
                                     'target' => $target,
                                     'source' => $source,
                                     'preview' => mb_substr(strip_tags($normalized), 0, 60),
                               ]);
 
-                              return $this->driver->translate($normalized, $target, $source);
+                              return $this->withDriverCacheBypass(
+                                    $force,
+                                    fn() => $this->driver->translate($normalized, $target, $source)
+                              );
                         }
                   );
 
@@ -141,6 +144,16 @@ class TranslationService
                         'source' => $source,
                         'error' => $e->getMessage(),
                   ]);
+
+                  // The throw may have come from reading a corrupt cache entry
+                  // (e.g. a bad serialized blob in a database store). Evict the
+                  // key so the next attempt is a clean miss instead of failing
+                  // forever until a manual cache:clear.
+                  try {
+                        Cache::forget($cacheKey);
+                  } catch (\Throwable) {
+                        // Nothing more we can do — still return the original.
+                  }
 
                   return $text;
             }
@@ -204,7 +217,7 @@ class TranslationService
                         continue;
                   }
 
-                  $cached = Cache::get($cacheKey);
+                  $cached = $this->safeCacheGet($cacheKey);
 
                   if ($cached !== null) {
                         $output[$key] = $cached;
@@ -220,7 +233,10 @@ class TranslationService
             }
 
             try {
-                  $translated = $this->driver->translateBatch($needsTranslation, $target, $source);
+                  $translated = $this->withDriverCacheBypass(
+                        $force,
+                        fn() => $this->driver->translateBatch($needsTranslation, $target, $source)
+                  );
             } catch (\Throwable $e) {
                   Log::error('[LaraGlot] Batch translation failed.', [
                         'target' => $target,
@@ -228,7 +244,15 @@ class TranslationService
                         'error' => $e->getMessage(),
                   ]);
 
-                  $translated = $needsTranslation;
+                  // Do NOT swallow this and fall back to source text: doing so
+                  // used to cache the untranslated source under the target
+                  // locale for 30 days and let jobs report success on files
+                  // that were 100% English. Batch callers are queue jobs and
+                  // console commands — let them fail loudly and retry.
+                  throw new \RuntimeException(
+                        "Batch translation to [{$target}] failed: {$e->getMessage()}",
+                        previous: $e
+                  );
             }
 
             $ttl = $this->cacheTtl();
@@ -282,6 +306,61 @@ class TranslationService
       protected function makeCacheKey(string $hash): string
       {
             return "lara-glot.translation.{$hash}";
+      }
+
+      /**
+       * Run a driver call with the driver's OWN string-level cache disabled
+       * when forcing. Drivers keep a second cache layer under their own keys;
+       * without this, a forced refresh (repair, laraglot:retry) evicts only
+       * this service's layer and the driver re-serves the stale — possibly
+       * poisoned — cached value it was asked to re-translate.
+       *
+       * @template T
+       * @param  callable(): T $call
+       * @return T
+       */
+      protected function withDriverCacheBypass(bool $force, callable $call): mixed
+      {
+            if (!$force || !method_exists($this->driver, 'setCacheEnabled')) {
+                  return $call();
+            }
+
+            $previous = method_exists($this->driver, 'isCacheEnabled')
+                  ? $this->driver->isCacheEnabled()
+                  : true;
+
+            $this->driver->setCacheEnabled(false);
+
+            try {
+                  return $call();
+            } finally {
+                  $this->driver->setCacheEnabled($previous);
+            }
+      }
+
+      /**
+       * Read a key from the cache, treating an unreadable (corrupt) entry as a
+       * miss and evicting it so it cannot keep failing until a manual
+       * cache:clear.
+       */
+      protected function safeCacheGet(string $key): mixed
+      {
+            try {
+                  return Cache::get($key);
+            } catch (\Throwable $e) {
+                  Log::warning('[LaraGlot] Evicting unreadable cache entry.', [
+                        'key' => $key,
+                        'error' => $e->getMessage(),
+                  ]);
+
+                  try {
+                        Cache::forget($key);
+                  } catch (\Throwable) {
+                        // Store refused the delete — still treat as a miss.
+                  }
+
+                  return null;
+            }
       }
 
       /**

@@ -39,5 +39,8 @@ class TestCase extends Orchestra
             ]);
             $app['config']->set('cache.default', 'array');
             $app['config']->set('queue.default', 'sync');
+            // Pin the test DB so a DB_CONNECTION/DB_DATABASE in the shell env
+            // can never point the suite at a real database.
+            $app['config']->set('database.default', 'testing');
       }
 }

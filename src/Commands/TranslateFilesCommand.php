@@ -5,6 +5,7 @@ namespace Tonydev\LaraGlot\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\File;
 use Tonydev\LaraGlot\Jobs\TranslateFilesJob;
+use Tonydev\LaraGlot\Services\FileTranslationService;
 
 class TranslateFilesCommand extends Command
 {
@@ -65,6 +66,7 @@ class TranslateFilesCommand extends Command
             $sync = (bool) $this->option('sync');
             $queue = config('lara-glot.queue', 'translations');
             $jobCount = 0;
+            $failures = 0;
 
             $this->info(sprintf(
                   '🔍 Dispatching jobs for %d file(s) × %d locale(s) [queue: %s]',
@@ -79,14 +81,40 @@ class TranslateFilesCommand extends Command
                   foreach ($files as $fileName) {
                         $this->line("  📄 {$fileName}.php → queuing…");
 
-                        $job = new TranslateFilesJob($fileName, $locale, $force);
-
                         if ($sync) {
-                              // Useful for small sites or CI pipelines
-                              dispatch_sync($job);
-                              $this->info("  ✅ Done: lang/{$locale}/{$fileName}.php");
+                              // Useful for small sites or CI pipelines. Runs the service
+                              // inline (dispatch_sync() cannot return the job's stats) so
+                              // real translated-vs-fallback counts reach the console.
+                              // A failed file (driver error, 100% fallback) is reported and
+                              // fails the command — never a silent "Done".
+                              try {
+                                    $stats = $this->translateFileInline($fileName, $locale, $force);
+                              } catch (\Throwable $e) {
+                                    $this->error("  ❌ Failed: lang/{$locale}/{$fileName}.php — {$e->getMessage()}");
+                                    $failures++;
+                                    $jobCount++;
+                                    continue;
+                              }
+
+                              if ($stats === null) {
+                                    $this->line("  ⏭️  Skipped (already exists): lang/{$locale}/{$fileName}.php");
+                              } else {
+                                    $summary = "{$stats['translated']}/{$stats['total']} translated";
+
+                                    if ($stats['identical'] > 0) {
+                                          $summary .= ", {$stats['identical']} identical to source";
+                                    }
+
+                                    $warnRatio = (float) config('lara-glot.fallback.warn_ratio', 0.5);
+
+                                    if ($stats['total'] > 0 && $stats['ratio'] >= $warnRatio) {
+                                          $this->warn("  ⚠️  Done with fallbacks: lang/{$locale}/{$fileName}.php ({$summary})");
+                                    } else {
+                                          $this->info("  ✅ Done: lang/{$locale}/{$fileName}.php ({$summary})");
+                                    }
+                              }
                         } else {
-                              dispatch($job)->onQueue($queue);
+                              dispatch(new TranslateFilesJob($fileName, $locale, $force))->onQueue($queue);
                               $this->line("  ✉️  Job dispatched to [{$queue}]");
                         }
 
@@ -95,12 +123,36 @@ class TranslateFilesCommand extends Command
             }
 
             $this->newLine();
-            $this->info("✨ {$jobCount} job(s) dispatched. Run your queue worker to process them.");
+
+            if ($failures > 0) {
+                  $this->error("💥 {$failures} of {$jobCount} job(s) failed. See messages above and storage/logs/laravel.log.");
+
+                  return self::FAILURE;
+            }
+
+            $this->info($sync
+                  ? "✨ {$jobCount} file(s) processed."
+                  : "✨ {$jobCount} job(s) dispatched. Run your queue worker to process them.");
 
             return self::SUCCESS;
       }
 
       // ─────────────────────────────────────────────────────────────────────────
+
+      /**
+       * Translate one file inline, mirroring TranslateFilesJob's skip logic.
+       * Returns the fallback stats, or null when the file was skipped.
+       */
+      protected function translateFileInline(string $fileName, string $locale, bool $force): ?array
+      {
+            $targetPath = lang_path("{$locale}/{$fileName}.php");
+
+            if (!$force && file_exists($targetPath)) {
+                  return null;
+            }
+
+            return app(FileTranslationService::class)->translateFile($fileName, $locale);
+      }
 
       /**
        * Return a plain array of file base-names (no extension) to translate.

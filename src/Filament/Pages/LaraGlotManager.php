@@ -30,8 +30,10 @@ class LaraGlotManager extends Page
       protected static UnitEnum|string|null $navigationGroup = 'Services';
       protected static ?string $slug = 'lara-glot-manager';
 
-      // ✅ Must be static — Filament v4 declares $view as static on the Page base class.
-      protected static string $view = 'lara-glot::filament.admin.pages.lara-glot-manager';
+      // Must NOT be static — Filament v4/v5 declare Page::$view as an instance
+      // property; redeclaring it static is a PHP fatal ("Cannot redeclare
+      // non static Filament\Pages\Page::$view as static").
+      protected string $view = 'lara-glot::filament.admin.pages.lara-glot-manager';
 
       // ─────────────────────────────────────────────────────────────────────────
       // Session keys

@@ -212,6 +212,25 @@ abstract class AbstractLlmDriver extends AbstractTranslationDriver
                         ['error' => $e->getMessage()]
                   );
 
+                  // A timeout / rate-limit on a big chunk usually means the
+                  // request was too large for the model's speed — halve it and
+                  // retry before giving up, so one slow call doesn't drop all
+                  // 30 strings to source. Terminal errors (auth, bad request)
+                  // skip straight to fallback so they can't multiply API calls.
+                  if (count($chunk) > 1 && $this->isTransientError($e)) {
+                        Log::info("{$this->logTag()} Retrying failed chunk as two sub-chunks.", [
+                              'size' => count($chunk),
+                        ]);
+
+                        $merged = [];
+
+                        foreach (array_chunk($chunk, (int) ceil(count($chunk) / 2), true) as $half) {
+                              $merged += $this->translateChunk($half, $target, $source);
+                        }
+
+                        return $merged;
+                  }
+
                   // Restore placeholders on the originals so callers never
                   // receive raw __VAR_0__ tokens, even on the fallback path.
                   $fallback = [];
@@ -225,6 +244,20 @@ abstract class AbstractLlmDriver extends AbstractTranslationDriver
 
                   return $fallback;
             }
+      }
+
+      /**
+       * Heuristic transient-vs-terminal classification: timeouts, connection
+       * drops, rate limits, and server errors are worth retrying at a smaller
+       * chunk size; anything else (401, 400, JSON contract violations after
+       * retries) is not.
+       */
+      protected function isTransientError(\Throwable $e): bool
+      {
+            return (bool) preg_match(
+                  '/timed?\s?out|timeout|cURL error (?:6|7|28|35|52|56)\b|HTTP (?:408|429|5\d\d)/i',
+                  $e->getMessage()
+            );
       }
 
       // ── Quality review pass ──────────────────────────────────────────────────

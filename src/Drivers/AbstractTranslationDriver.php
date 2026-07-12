@@ -3,8 +3,8 @@
 namespace Tonydev\LaraGlot\Drivers;
 
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Concurrency;
 use Illuminate\Support\Facades\Log;
+use Tonydev\LaraGlot\Concerns\TransportsConcurrencyResults;
 use Tonydev\LaraGlot\Contracts\TranslationDriverInterface;
 use Tonydev\LaraGlot\Drivers\Concerns\DecodesJsonResponse;
 use Tonydev\LaraGlot\Drivers\Concerns\ProtectsPlaceholders;
@@ -13,6 +13,7 @@ abstract class AbstractTranslationDriver implements TranslationDriverInterface
 {
       use ProtectsPlaceholders;
       use DecodesJsonResponse;
+      use TransportsConcurrencyResults;
 
       // ─────────────────────────────────────────────────────────────────────────
       // Shared config properties
@@ -79,6 +80,11 @@ abstract class AbstractTranslationDriver implements TranslationDriverInterface
             return $this;
       }
 
+      public function isCacheEnabled(): bool
+      {
+            return $this->cacheEnabled;
+      }
+
       public function isCached(string $text, string $target, string $source = 'en'): bool
       {
             if (!$this->cacheEnabled) {
@@ -133,7 +139,25 @@ abstract class AbstractTranslationDriver implements TranslationDriverInterface
                   return null;
             }
 
-            $value = Cache::get($key);
+            try {
+                  $value = Cache::get($key);
+            } catch (\Throwable $e) {
+                  // A corrupt entry (e.g. a bad serialized blob in a database
+                  // store) must read as a miss, not a permanent failure. Evict
+                  // it so the key can be rewritten instead of throwing forever.
+                  Log::warning('[LaraGlot] Evicting unreadable cache entry.', [
+                        'key' => $key,
+                        'error' => $e->getMessage(),
+                  ]);
+
+                  try {
+                        Cache::forget($key);
+                  } catch (\Throwable) {
+                        // The store may refuse the delete too — still a miss.
+                  }
+
+                  $value = null;
+            }
 
             if (is_string($value)) {
                   $this->cacheHits++;
@@ -153,42 +177,12 @@ abstract class AbstractTranslationDriver implements TranslationDriverInterface
       }
 
       // ─────────────────────────────────────────────────────────────────────────
-      // Concurrency helper  ← BUG FIXED HERE
+      // Concurrency helper
       // ─────────────────────────────────────────────────────────────────────────
-
-      /**
-       * Fan out an array of callables using Laravel's Concurrency::run(), processing
-       * them in sequential batches of $batchSize tasks each.
-       *
-       * FIX: Concurrency::run() returns a sequential 0-indexed list, NOT keyed by
-       * the original task keys. We therefore strip keys before calling ::run() and
-       * re-apply the original keys manually from $originalKeys after each batch.
-       *
-       * @param  array<string|int, callable> $tasks
-       * @param  int                         $batchSize
-       * @return array<string|int, mixed>
-       */
-      protected function runConcurrentBatches(array $tasks, int $batchSize): array
-      {
-            $results = [];
-
-            foreach (array_chunk($tasks, $batchSize, true) as $batch) {
-                  // ── Preserve original keys before stripping them ──────────────
-                  // Concurrency::run() ignores array keys and returns a plain list.
-                  // We capture the original keys here so we can re-apply them below.
-                  $originalKeys = array_keys($batch);
-
-                  // array_values() strips keys → Concurrency::run() gets [0, 1, 2 …]
-                  $batchResults = Concurrency::run(array_values($batch));
-
-                  // ── Re-apply original keys to the sequential result list ───────
-                  foreach ($batchResults as $index => $value) {
-                        $results[$originalKeys[$index]] = $value;
-                  }
-            }
-
-            return $results;
-      }
+      //
+      // runConcurrentBatches() lives in the TransportsConcurrencyResults trait,
+      // shared with SmartTranslationService: results cross the process boundary
+      // base64-encoded so multibyte payloads survive the `process` driver.
 
       // ─────────────────────────────────────────────────────────────────────────
       // Retry helper
@@ -223,8 +217,10 @@ abstract class AbstractTranslationDriver implements TranslationDriverInterface
                         ]);
 
                         if ($attempt < $maxAttempts) {
-                              // Progressive back-off: usleep() takes microseconds → ms × 1_000
-                              usleep($baseDelayMs * $attempt * 1_000);
+                              // Exponential back-off: base, 2×, 4×, 8× … — repeated 500s
+                              // from flaky endpoints need growing gaps, not fixed ones.
+                              // usleep() takes microseconds → ms × 1_000.
+                              usleep($baseDelayMs * (2 ** ($attempt - 1)) * 1_000);
                         }
                   }
             }

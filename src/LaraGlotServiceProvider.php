@@ -3,11 +3,15 @@
 namespace Tonydev\LaraGlot;
 
 use Illuminate\Support\ServiceProvider;
+use Tonydev\LaraGlot\Commands\AuditTranslationsCommand;
 use Tonydev\LaraGlot\Commands\DispatchTranslations;
+use Tonydev\LaraGlot\Commands\RetryTranslationsCommand;
 use Tonydev\LaraGlot\Commands\TranslateFilesCommand;
 use Tonydev\LaraGlot\Services\FileTranslationService;
 use Tonydev\LaraGlot\Services\ModelTranslationManager;
+use Tonydev\LaraGlot\Services\RetryQueue;
 use Tonydev\LaraGlot\Services\SmartTranslationService;
+use Tonydev\LaraGlot\Services\TranslationAuditor;
 use Tonydev\LaraGlot\Services\TranslationService;
 
 class LaraGlotServiceProvider extends ServiceProvider
@@ -32,11 +36,18 @@ class LaraGlotServiceProvider extends ServiceProvider
                   fn() => new TranslationService()
             );
 
+            // Retry queue — durable dead-letter state for source-text fallbacks.
+            $this->app->singleton(
+                  RetryQueue::class,
+                  fn() => new RetryQueue()
+            );
+
             // File translation service — wraps TranslationService with file I/O.
             $this->app->singleton(
                   FileTranslationService::class,
                   fn($app) => new FileTranslationService(
-                        $app->make(TranslationService::class)
+                        $app->make(TranslationService::class),
+                        $app->make(RetryQueue::class)
                   )
             );
 
@@ -44,7 +55,8 @@ class LaraGlotServiceProvider extends ServiceProvider
             $this->app->singleton(
                   SmartTranslationService::class,
                   fn($app) => new SmartTranslationService(
-                        $app->make(TranslationService::class)
+                        $app->make(TranslationService::class),
+                        $app->make(RetryQueue::class)
                   )
             );
 
@@ -53,6 +65,15 @@ class LaraGlotServiceProvider extends ServiceProvider
                   ModelTranslationManager::class,
                   fn($app) => new ModelTranslationManager(
                         $app->make(SmartTranslationService::class)
+                  )
+            );
+
+            // Auditor — detects and repairs silent source-text fallbacks.
+            $this->app->singleton(
+                  TranslationAuditor::class,
+                  fn($app) => new TranslationAuditor(
+                        $app->make(TranslationService::class),
+                        $app->make(FileTranslationService::class)
                   )
             );
       }
@@ -68,6 +89,9 @@ class LaraGlotServiceProvider extends ServiceProvider
                   'lara-glot'
             );
 
+            // ── Migrations — retry/dead-letter table ──────────────────────────────
+            $this->loadMigrationsFrom(__DIR__ . '/../database/migrations');
+
             // ── Console-only: publishables + Artisan commands ─────────────────────
             if ($this->app->runningInConsole()) {
 
@@ -81,8 +105,15 @@ class LaraGlotServiceProvider extends ServiceProvider
                         __DIR__ . '/../resources/views' => resource_path('views/vendor/lara-glot'),
                   ], 'lara-glot-views');
 
+                  // php artisan vendor:publish --tag=lara-glot-migrations
+                  $this->publishes([
+                        __DIR__ . '/../database/migrations' => database_path('migrations'),
+                  ], 'lara-glot-migrations');
+
                   $this->commands([
+                        AuditTranslationsCommand::class,
                         DispatchTranslations::class,
+                        RetryTranslationsCommand::class,
                         TranslateFilesCommand::class,
                   ]);
             }

@@ -14,12 +14,11 @@ class DispatchTranslations extends Command
 
       protected $description = 'Scan and dispatch translation jobs for models needing updates';
 
-      public function __construct(protected ModelTranslationManager $manager)
-      {
-            parent::__construct();
-      }
-
-      public function handle(): int
+      // NOTE: inject via handle(), not the constructor — Artisan instantiates
+      // every registered command on EVERY artisan invocation, so constructor
+      // injection would drag the whole translation service chain (including
+      // the configured driver) into `php artisan migrate` and friends.
+      public function handle(ModelTranslationManager $manager): int
       {
             $force = (bool) $this->option('force');
             $targetModel = $this->argument('model');
@@ -44,7 +43,7 @@ class DispatchTranslations extends Command
             }
 
             try {
-                  $batchId = $this->manager->translateModelClasses($models, $force, $locales);
+                  $batchId = $manager->translateModelClasses($models, $force, $locales);
 
                   if ($batchId === null) {
                         $this->warn('No records found in the specified model(s) — nothing dispatched.');

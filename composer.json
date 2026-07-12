@@ -42,7 +42,7 @@
     "suggest": {
         "stichoza/google-translate-php": "^5.3 — Required for the Google driver (unofficial, no API key needed)",
         "cloudstudio/ollama-laravel": "^2.0 — Required for the Ollama local-LLM driver",
-        "filament/filament": "^3.0 — Required for the LaraGlot Filament management UI",
+        "filament/filament": "^4.0|^5.0 — Required for the LaraGlot Filament management UI (uses the v4+ Schemas API)",
         "spatie/laravel-translatable": "^6.0 — Required for Eloquent model translation (HasTranslations trait)"
     },
     "autoload": {

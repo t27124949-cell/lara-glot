@@ -31,11 +31,16 @@ class TranslateFilesJob implements ShouldQueue
       ) {
       }
 
-      public function handle(FileTranslationService $service): void
+      /**
+       * Returns the fallback stats from FileTranslationService::translateFile()
+       * (or null when the file was skipped) so `dispatch_sync()` callers — the
+       * laraglot:files --sync command — can print translated-vs-fallback counts.
+       */
+      public function handle(FileTranslationService $service): ?array
       {
             // If the whole batch has been cancelled via the UI, bail early.
             if ($this->batch()?->cancelled()) {
-                  return;
+                  return null;
             }
 
             Log::info('🚀 [LaraGlot] File job started', [
@@ -53,16 +58,20 @@ class TranslateFilesJob implements ShouldQueue
                         'file' => $this->fileName,
                         'locale' => $this->locale,
                   ]);
-                  return;
+                  return null;
             }
 
             try {
-                  $service->translateFile($this->fileName, $this->locale);
+                  $stats = $service->translateFile($this->fileName, $this->locale);
 
                   Log::info('✅ [LaraGlot] File job complete', [
                         'file' => $this->fileName,
                         'locale' => $this->locale,
+                        'translated' => $stats['translated'],
+                        'identical_to_source' => $stats['identical'],
                   ]);
+
+                  return $stats;
 
             } catch (\Throwable $e) {
                   Log::error('❌ [LaraGlot] File job failed', [

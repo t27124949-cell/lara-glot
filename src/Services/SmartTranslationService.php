@@ -4,22 +4,30 @@ namespace Tonydev\LaraGlot\Services;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Concurrency;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Tonydev\LaraGlot\Concerns\DeterminesTranslatability;
+use Tonydev\LaraGlot\Concerns\TransportsConcurrencyResults;
 use Tonydev\LaraGlot\Services\TranslationService;
 
 class SmartTranslationService
 {
+      use DeterminesTranslatability;
+      use TransportsConcurrencyResults;
+
       /**
        * The translation service — provides in-process caching, force-refresh,
        * and text normalisation on top of the raw driver.
        */
       protected TranslationService $translator;
 
-      public function __construct(TranslationService $translator)
+      /** Dead-letter state for values that fell back to source text. */
+      protected RetryQueue $retryQueue;
+
+      public function __construct(TranslationService $translator, ?RetryQueue $retryQueue = null)
       {
             $this->translator = $translator;
+            $this->retryQueue = $retryQueue ?? new RetryQueue();
       }
 
       // ─────────────────────────────────────────────────────────────────────────
@@ -95,6 +103,11 @@ class SmartTranslationService
                         Log::info("ℹ️ [LaraGlot] No changes detected for {$modelName} ID {$modelId}");
                   }
 
+                  // Never silently fall back: record attributes whose target-
+                  // locale value is still missing or identical to the source
+                  // so laraglot:retry can re-attempt them on a schedule.
+                  $this->recordFallbacks($model, $translatableAttrs, $locales);
+
                   if (method_exists($model, 'sections')) {
                         $this->translateSections($model, $force, $locales);
                   }
@@ -109,6 +122,56 @@ class SmartTranslationService
 
             } finally {
                   $lock->release();
+            }
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // Fallback recording
+      // ─────────────────────────────────────────────────────────────────────────
+
+      /**
+       * Record every attribute/locale pair whose value is still missing or
+       * identical to the English source after a translation run, so the
+       * laraglot:retry command can re-attempt them later. Best-effort — a
+       * missing retry table degrades to a logged notice inside RetryQueue.
+       *
+       * @param list<string> $attributes  The model's translatable attributes.
+       * @param list<string> $locales     Requested locales; empty = all configured.
+       */
+      protected function recordFallbacks(Model $model, array $attributes, array $locales): void
+      {
+            $targetLocales = ($locales ?: array_keys(config('lara-glot.languages', [])));
+
+            foreach ($attributes as $attribute) {
+                  $translations = $model->getTranslations($attribute);
+
+                  if (!is_array($translations)) {
+                        continue;
+                  }
+
+                  $sourceValue = $translations['en'] ?? null;
+
+                  if (!$this->isAuditable($attribute, $sourceValue)) {
+                        continue;
+                  }
+
+                  foreach ($targetLocales as $locale) {
+                        if ($locale === 'en' || $this->shouldSkipKey($locale)) {
+                              continue;
+                        }
+
+                        $current = $translations[$locale] ?? null;
+
+                        if ($current === null || $current === '' || $current === $sourceValue) {
+                              $this->retryQueue->record(
+                                    'model',
+                                    get_class($model),
+                                    $model->getKey() . ':' . $attribute,
+                                    $locale,
+                                    $sourceValue
+                              );
+                        }
+                  }
             }
       }
 
@@ -248,19 +311,10 @@ class SmartTranslationService
             }
 
             // ── Run in batches of 5, preserving locale keys ───────────────────────
-            // ✅ FIX: Concurrency::run() returns a 0-indexed list, NOT keyed by the
-            // original task keys. We capture $originalKeys before stripping them,
-            // then re-apply them manually after each batch completes.
-            $results = [];
-
-            foreach (array_chunk($tasks, 5, true) as $batch) {
-                  $originalKeys = array_keys($batch);
-                  $batchResults = Concurrency::run(array_values($batch));
-
-                  foreach ($batchResults as $index => $translatedText) {
-                        $results[$originalKeys[$index]] = $translatedText;
-                  }
-            }
+            // runConcurrentBatches() (TransportsConcurrencyResults) re-applies the
+            // locale keys AND base64-wraps results so multibyte translations
+            // survive the `process` concurrency driver intact.
+            $results = $this->runConcurrentBatches($tasks, 5);
 
             // ── Apply results back to the translations array ──────────────────────
             foreach ($results as $locale => $translatedText) {

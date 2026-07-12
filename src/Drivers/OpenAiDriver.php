@@ -22,8 +22,12 @@ class OpenAiDriver extends AbstractLlmDriver
 
       protected string $baseUrl;
 
+      /** Per-request HTTP timeout in seconds — slow reasoning models need more than 90s. */
+      protected int $timeout;
+
       public function __construct()
       {
+            $this->timeout = (int) config('lara-glot.drivers.openai.timeout', 120);
             $this->apiKey = (string) config('lara-glot.drivers.openai.api_key', '');
             $this->model = (string) config('lara-glot.drivers.openai.model', 'gpt-5-mini');
             $this->baseUrl = rtrim(
@@ -46,7 +50,7 @@ class OpenAiDriver extends AbstractLlmDriver
       protected function sendChunk(string $jsonInput, string $systemPrompt): string
       {
             $response = Http::withToken($this->apiKey)
-                  ->timeout(90)
+                  ->timeout($this->timeout)
                   ->post("{$this->baseUrl}/chat/completions", [
                         'model' => $this->model,
                         'messages' => [

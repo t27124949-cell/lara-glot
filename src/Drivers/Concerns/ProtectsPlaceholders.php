@@ -176,6 +176,28 @@ trait ProtectsPlaceholders
       }
 
       /**
+       * True when every opaque placeholder key survived the API round-trip
+       * byte-identical. Engines occasionally mangle tokens (re-cased,
+       * translated, or split with spaces); restorePlaceholders() uses exact
+       * matching, so a mangled token would leak raw __VAR_0__ text into the
+       * final translation. Callers should treat a failed check as a
+       * retryable error.
+       *
+       * @param  string               $translated    Text returned by the translation API.
+       * @param  array<string,string> $placeholders  The map produced by protectPlaceholders().
+       */
+      protected function placeholdersSurvived(string $translated, array $placeholders): bool
+      {
+            foreach (array_keys($placeholders) as $key) {
+                  if (!str_contains($translated, $key)) {
+                        return false;
+                  }
+            }
+
+            return true;
+      }
+
+      /**
        * Swap every opaque placeholder key back to its original value.
        *
        * Uses a single str_replace() call (array form) which is faster than
